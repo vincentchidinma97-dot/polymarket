@@ -824,14 +824,25 @@ async function openTrader(wallet, name) {
   } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
 }
 
-/* ============ PAPER TRADING ENGINE v2 ============ */
+/* ============ PAPER TRADING ENGINE v3 ============ */
 const PAPER_KEY = 'pm_paper';
 const PAPER_STARTING_BALANCE = 10000;
 
+// Risk management constants
+const TAKE_PROFIT_PCT = 0.25;
+const STOP_LOSS_PCT = -0.20;
+const TRAILING_STOP_TRIGGER = 0.15;
+const MAX_POSITIONS = 20;
+const MAX_EXPOSURE_PCT = 0.60;
+const CONSENSUS_EXIT_THRESHOLD = 3;
+
 // Tiered conviction thresholds
-const TIER_ELITE = 10;   // 10+ traders = elite conviction — max size
-const TIER_STRONG = 6;   // 6-9 traders = strong — good size
-const TIER_WATCHLIST = 1; // watchlist mirroring — smaller exploratory size
+const TIER_ELITE = 10;
+const TIER_STRONG = 6;
+const TIER_WATCHLIST = 1;
+
+let paperAutoTimer = null;
+let lastConsensusSnapshot = {};
 
 function getPaper() {
   try {
@@ -840,7 +851,7 @@ function getPaper() {
   } catch {}
   return {
     balance: PAPER_STARTING_BALANCE, open: [], closed: [],
-    autoTrade: true, mirrorWatchlist: true,
+    autoTrade: true, mirrorWatchlist: true, autoClose: true,
     minConsensus: TIER_STRONG, created: Date.now()
   };
 }
@@ -849,35 +860,29 @@ function savePaper(p) { localStorage.setItem(PAPER_KEY, JSON.stringify(p)); }
 function resetPaper() {
   if (!confirm('Reset paper account to $10,000? All simulated trades will be erased.')) return;
   localStorage.removeItem(PAPER_KEY);
+  lastConsensusSnapshot = {};
   loadPaper();
 }
 
-function toggleAutoTrade() {
-  const p = getPaper();
-  p.autoTrade = !p.autoTrade;
-  savePaper(p);
-  loadPaper();
-}
-
-function toggleMirrorWatchlist() {
-  const p = getPaper();
-  p.mirrorWatchlist = !p.mirrorWatchlist;
-  savePaper(p);
-  loadPaper();
-}
-
-function setMinConsensus(val) {
-  const p = getPaper();
-  p.minConsensus = parseInt(val);
-  savePaper(p);
-}
+function toggleAutoTrade() { const p = getPaper(); p.autoTrade = !p.autoTrade; savePaper(p); loadPaper(); }
+function toggleMirrorWatchlist() { const p = getPaper(); p.mirrorWatchlist = !p.mirrorWatchlist; savePaper(p); loadPaper(); }
+function toggleAutoClose() { const p = getPaper(); p.autoClose = !p.autoClose; savePaper(p); loadPaper(); }
+function setMinConsensus(val) { const p = getPaper(); p.minConsensus = parseInt(val); savePaper(p); }
 
 function positionSize(balance, tier, traders) {
-  if (traders >= 20) return Math.min(balance * 0.15, 800);
-  if (traders >= TIER_ELITE) return Math.min(balance * 0.10, 600);
-  if (traders >= TIER_STRONG) return Math.min(balance * 0.06, 400);
-  if (tier === 'watchlist') return Math.min(balance * 0.03, 200);
-  return Math.min(balance * 0.02, 100);
+  const maxInvest = PAPER_STARTING_BALANCE * MAX_EXPOSURE_PCT;
+  const invested = getPaper().open.reduce((a, p) => a + p.cost, 0);
+  const room = maxInvest - invested;
+  if (room < 10) return 0;
+
+  let size;
+  if (traders >= 20) size = Math.min(balance * 0.15, 800);
+  else if (traders >= TIER_ELITE) size = Math.min(balance * 0.10, 600);
+  else if (traders >= TIER_STRONG) size = Math.min(balance * 0.06, 400);
+  else if (tier === 'watchlist') size = Math.min(balance * 0.03, 200);
+  else size = Math.min(balance * 0.02, 100);
+
+  return Math.min(size, room);
 }
 
 function tradeLabel(traders, source) {
@@ -887,15 +892,121 @@ function tradeLabel(traders, source) {
   return 'strong';
 }
 
+/* ---- Auto-close: TP, SL, trailing stop ---- */
+function runAutoClose(paper) {
+  if (!paper.autoClose) return { closed: 0, reasons: {} };
+  const toClose = [];
+  for (let i = paper.open.length - 1; i >= 0; i--) {
+    const pos = paper.open[i];
+    const cur = pos.currentPrice || pos.entry;
+    const val = pos.shares * cur;
+    const pnlPct = (val - pos.cost) / pos.cost;
+
+    // Update high water mark
+    if (!pos.highWaterMark || cur > pos.highWaterMark) pos.highWaterMark = cur;
+
+    let reason = null;
+
+    if (pnlPct >= TAKE_PROFIT_PCT) {
+      reason = 'take-profit';
+    } else if (pnlPct <= STOP_LOSS_PCT) {
+      reason = 'stop-loss';
+    } else if (pos.highWaterMark > pos.entry) {
+      const peakPnlPct = (pos.shares * pos.highWaterMark - pos.cost) / pos.cost;
+      if (peakPnlPct >= TRAILING_STOP_TRIGGER && cur <= pos.entry) {
+        reason = 'trailing-stop';
+      }
+    }
+
+    if (reason) toClose.push({ idx: i, reason });
+  }
+
+  const reasons = {};
+  for (const { idx, reason } of toClose) {
+    const pos = paper.open[idx];
+    const cur = pos.currentPrice || pos.entry;
+    const val = pos.shares * cur;
+    const pnl = val - pos.cost;
+    paper.balance += val;
+    paper.closed.push({
+      ...pos, closedAt: Date.now(), exitPrice: cur, pnl, value: val, closeReason: reason
+    });
+    paper.open.splice(idx, 1);
+    reasons[reason] = (reasons[reason] || 0) + 1;
+  }
+
+  return { closed: toClose.length, reasons };
+}
+
+/* ---- Scout insiders: auto-populate watchlist ---- */
+async function scoutInsiders() {
+  const btn = document.getElementById('scout-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scouting…'; }
+
+  try {
+    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
+    const profitable = lb.filter(u => u.pnl > 0);
+
+    const enriched = await Promise.all(profitable.map(async u => {
+      try {
+        const pos = await api('positions', { user: u.proxyWallet, limit: 200 });
+        return { ...u, totalPositions: pos.length };
+      } catch { return { ...u, totalPositions: null }; }
+    }));
+
+    const candidates = enriched.filter(u =>
+      u.totalPositions !== null && u.totalPositions < 100 &&
+      u.vol > 0 && (u.pnl / u.vol) > 0.15
+    ).sort((a, b) => (b.pnl / b.vol) - (a.pnl / a.vol));
+
+    const wl = getWatchlist();
+    let added = 0;
+    for (const u of candidates) {
+      if (added >= 10) break;
+      if (wl[u.proxyWallet]) continue;
+      const name = displayName(u);
+      wl[u.proxyWallet] = { name, addedAt: Date.now(), lastPositionCount: null, scoutedBy: 'auto' };
+      added++;
+    }
+    saveWatchlist(wl);
+
+    if (btn) {
+      btn.textContent = added > 0 ? `Added ${added} insider(s)` : 'No new insiders found';
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = 'Scout insiders'; }, 3000);
+    }
+
+    if (added > 0 && currentTab === 'paper') loadPaper();
+  } catch (e) {
+    if (btn) { btn.textContent = 'Scout failed'; btn.disabled = false; }
+  }
+}
+
+/* ---- Consensus exit detection ---- */
+function detectConsensusExits(paper, currentConsensus) {
+  const exits = [];
+  for (const pos of paper.open) {
+    if (pos.source !== 'consensus') continue;
+    const prev = lastConsensusSnapshot[pos.key];
+    const now = currentConsensus[pos.key];
+    if (prev && prev >= CONSENSUS_EXIT_THRESHOLD) {
+      const dropped = prev - (now || 0);
+      if (dropped >= CONSENSUS_EXIT_THRESHOLD) {
+        exits.push(pos);
+      }
+    }
+  }
+  return exits;
+}
+
 async function runAutoTrade() {
   const paper = getPaper();
-  if (!paper.autoTrade || paper.balance < 10) return { placed: 0, watchlistPlaced: 0, paper };
+  if (!paper.autoTrade || paper.balance < 10) return { placed: 0, watchlistPlaced: 0, consensusExits: 0, paper };
 
-  let placed = 0, watchlistPlaced = 0;
+  let placed = 0, watchlistPlaced = 0, consensusExits = 0;
   const minC = paper.minConsensus || TIER_STRONG;
 
   try {
-    // === CONSENSUS TRADES: scan top 50 traders ===
     const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
     const profitable = lb.filter(u => u.pnl > 0);
 
@@ -917,38 +1028,61 @@ async function runAutoTrade() {
       }
     }
 
-    // Sort by trader count descending — take the strongest signals first
-    const sorted = Object.values(consensus)
-      .filter(c => c.traders.size >= minC)
-      .sort((a, b) => b.traders.size - a.traders.size);
+    // Build consensus count map for exit detection
+    const consensusCounts = {};
+    for (const [key, c] of Object.entries(consensus)) consensusCounts[key] = c.traders.size;
 
-    for (const c of sorted) {
-      const count = c.traders.size;
-      const avgEntry = c.entries.reduce((a, b) => a + b, 0) / c.entries.length;
-      const gap = avgEntry > 0 ? Math.abs(c.curPrice - avgEntry) / avgEntry : 1;
-      if (gap > 0.25) continue;
-
-      const tradeKey = `${c.title}|||${c.outcome}`;
-      if (paper.open.some(o => o.key === tradeKey)) continue;
-      if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
-
-      const size = positionSize(paper.balance, 'consensus', count);
-      if (size < 5 || size > paper.balance) continue;
-
-      const shares = size / c.curPrice;
-      paper.open.push({
-        key: tradeKey, title: c.title, outcome: c.outcome, slug: c.slug,
-        entry: c.curPrice, shares, cost: size,
-        strength: tradeLabel(count, 'consensus'),
-        traders: count, source: 'consensus', openedAt: Date.now()
-      });
-      paper.balance -= size;
-      placed++;
-      if (placed >= 3) break;
+    // Consensus exit detection
+    const exiting = detectConsensusExits(paper, consensusCounts);
+    for (const pos of exiting) {
+      const idx = paper.open.indexOf(pos);
+      if (idx === -1) continue;
+      const cur = pos.currentPrice || pos.entry;
+      const val = pos.shares * cur;
+      const pnl = val - pos.cost;
+      paper.balance += val;
+      paper.closed.push({ ...pos, closedAt: Date.now(), exitPrice: cur, pnl, value: val, closeReason: 'consensus-exit' });
+      paper.open.splice(idx, 1);
+      consensusExits++;
     }
 
-    // === WATCHLIST MIRROR TRADES ===
-    if (paper.mirrorWatchlist) {
+    lastConsensusSnapshot = consensusCounts;
+
+    // Open new consensus trades
+    if (paper.open.length < MAX_POSITIONS) {
+      const sorted = Object.values(consensus)
+        .filter(c => c.traders.size >= minC)
+        .sort((a, b) => b.traders.size - a.traders.size);
+
+      for (const c of sorted) {
+        if (paper.open.length >= MAX_POSITIONS) break;
+        const count = c.traders.size;
+        const avgEntry = c.entries.reduce((a, b) => a + b, 0) / c.entries.length;
+        const gap = avgEntry > 0 ? Math.abs(c.curPrice - avgEntry) / avgEntry : 1;
+        if (gap > 0.25) continue;
+
+        const tradeKey = `${c.title}|||${c.outcome}`;
+        if (paper.open.some(o => o.key === tradeKey)) continue;
+        if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
+
+        const size = positionSize(paper.balance, 'consensus', count);
+        if (size < 5 || size > paper.balance) continue;
+
+        const shares = size / c.curPrice;
+        paper.open.push({
+          key: tradeKey, title: c.title, outcome: c.outcome, slug: c.slug,
+          entry: c.curPrice, shares, cost: size,
+          strength: tradeLabel(count, 'consensus'),
+          traders: count, source: 'consensus', openedAt: Date.now(), highWaterMark: c.curPrice
+        });
+        paper.balance -= size;
+        placed++;
+        if (placed >= 3) break;
+      }
+    }
+
+    // Watchlist mirror trades
+    if (paper.mirrorWatchlist && paper.open.length < MAX_POSITIONS) {
       const wl = getWatchlist();
       const wallets = Object.keys(wl);
       if (wallets.length) {
@@ -964,9 +1098,10 @@ async function runAutoTrade() {
           } catch { return { wallet, name: wl[wallet].name, open: [], recentBuys: [] }; }
         }));
 
-        // Mirror recent buys from watched traders
         for (const wr of watchResults) {
+          if (paper.open.length >= MAX_POSITIONS) break;
           for (const buy of wr.recentBuys) {
+            if (paper.open.length >= MAX_POSITIONS) break;
             const tradeKey = `${buy.title}|||${buy.outcome}`;
             if (paper.open.some(o => o.key === tradeKey)) continue;
             if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
@@ -980,18 +1115,18 @@ async function runAutoTrade() {
               entry: buy.price, shares, cost: size,
               strength: 'watchlist', traders: 1,
               source: 'watchlist', sourceTrader: wr.name,
-              openedAt: Date.now()
+              openedAt: Date.now(), highWaterMark: buy.price
             });
             paper.balance -= size;
             watchlistPlaced++;
             if (watchlistPlaced >= 3) break;
           }
-          if (watchlistPlaced >= 3) break;
         }
 
-        // Also mirror large open positions from watched insiders
         for (const wr of watchResults) {
+          if (paper.open.length >= MAX_POSITIONS) break;
           for (const pos of wr.open.filter(p => p.currentValue > 500)) {
+            if (paper.open.length >= MAX_POSITIONS) break;
             const tradeKey = `${pos.title}|||${pos.outcome}`;
             if (paper.open.some(o => o.key === tradeKey)) continue;
             if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
@@ -1008,28 +1143,26 @@ async function runAutoTrade() {
               entry: pos.curPrice, shares, cost: size,
               strength: 'watchlist', traders: 1,
               source: 'watchlist', sourceTrader: wr.name,
-              openedAt: Date.now()
+              openedAt: Date.now(), highWaterMark: pos.curPrice
             });
             paper.balance -= size;
             watchlistPlaced++;
             if (watchlistPlaced >= 5) break;
           }
-          if (watchlistPlaced >= 5) break;
         }
       }
     }
 
     savePaper(paper);
-    return { placed, watchlistPlaced, paper };
+    return { placed, watchlistPlaced, consensusExits, paper };
   } catch (e) {
     savePaper(paper);
-    return { placed, watchlistPlaced, paper, error: e.message };
+    return { placed, watchlistPlaced, consensusExits, paper, error: e.message };
   }
 }
 
 async function updateOpenPrices(paper) {
-  const titlesToFind = paper.open.map(p => ({ title: p.key.split('|||')[0], outcome: p.key.split('|||')[1] }));
-  if (!titlesToFind.length) return paper;
+  if (!paper.open.length) return paper;
 
   try {
     const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 10 });
@@ -1040,11 +1173,26 @@ async function updateOpenPrices(paper) {
         allPos.push(...pos);
       } catch {}
     }
+
+    // Also fetch positions from watchlist traders for better price coverage
+    const wl = getWatchlist();
+    const wlWallets = Object.keys(wl).slice(0, 5);
+    for (const w of wlWallets) {
+      try {
+        const pos = await api('positions', { user: w, limit: 100 });
+        allPos.push(...pos);
+      } catch {}
+    }
+
     for (const op of paper.open) {
       const [title, outcome] = op.key.split('|||');
       const match = allPos.find(p => p.title === title && p.outcome === outcome);
-      if (match) op.currentPrice = match.curPrice;
-      else if (!op.currentPrice) op.currentPrice = op.entry;
+      if (match) {
+        op.currentPrice = match.curPrice;
+        if (!op.highWaterMark || match.curPrice > op.highWaterMark) op.highWaterMark = match.curPrice;
+      } else if (!op.currentPrice) {
+        op.currentPrice = op.entry;
+      }
     }
   } catch {}
   return paper;
@@ -1057,7 +1205,7 @@ function closePaperPosition(idx) {
   const value = pos.shares * (pos.currentPrice || pos.entry);
   const pnl = value - pos.cost;
   paper.balance += value;
-  paper.closed.push({ ...pos, closedAt: Date.now(), exitPrice: pos.currentPrice || pos.entry, pnl, value });
+  paper.closed.push({ ...pos, closedAt: Date.now(), exitPrice: pos.currentPrice || pos.entry, pnl, value, closeReason: 'manual' });
   paper.open.splice(idx, 1);
   savePaper(paper);
   loadPaper();
@@ -1074,6 +1222,9 @@ function getWeeklyRetro(paper) {
   const winRate = (wins.length / weekTrades.length * 100).toFixed(0);
   const best = weekTrades.reduce((a, t) => t.pnl > a.pnl ? t : a, weekTrades[0]);
   const worst = weekTrades.reduce((a, t) => t.pnl < a.pnl ? t : a, weekTrades[0]);
+
+  const avgHoldMs = weekTrades.reduce((a, t) => a + ((t.closedAt || 0) - (t.openedAt || 0)), 0) / weekTrades.length;
+  const avgHoldHrs = Math.round(avgHoldMs / 3600000);
 
   const byStrength = {};
   for (const t of weekTrades) {
@@ -1093,7 +1244,26 @@ function getWeeklyRetro(paper) {
     if (t.pnl > 0) bySource[src].wins++;
   }
 
-  return { totalPnl, wins: wins.length, losses: losses.length, winRate, best, worst, byStrength, bySource, total: weekTrades.length };
+  const byReason = {};
+  for (const t of weekTrades) {
+    const r = t.closeReason || 'manual';
+    byReason[r] = (byReason[r] || 0) + 1;
+  }
+
+  let maxDrawdown = 0, runningPnl = 0, peak = 0;
+  const sorted = [...weekTrades].sort((a, b) => a.closedAt - b.closedAt);
+  for (const t of sorted) {
+    runningPnl += t.pnl;
+    if (runningPnl > peak) peak = runningPnl;
+    const dd = peak - runningPnl;
+    if (dd > maxDrawdown) maxDrawdown = dd;
+  }
+
+  return {
+    totalPnl, wins: wins.length, losses: losses.length, winRate,
+    best, worst, byStrength, bySource, byReason,
+    avgHoldHrs, maxDrawdown, total: weekTrades.length
+  };
 }
 
 async function loadPaper() {
@@ -1103,16 +1273,25 @@ async function loadPaper() {
   let paper = getPaper();
   const wlCount = Object.keys(getWatchlist()).length;
 
-  if (paper.autoTrade && paper.open.length < 15) {
+  // Step 1: Auto-trade (opens new positions)
+  if (paper.autoTrade && paper.open.length < MAX_POSITIONS) {
     el.innerHTML = '<div class="status">Scanning consensus signals + watchlist activity…</div>';
     const result = await runAutoTrade();
     paper = result.paper;
-    if (result.placed > 0 || result.watchlistPlaced > 0) {
-      el.innerHTML = `<div class="status">Placed ${result.placed} consensus + ${result.watchlistPlaced} watchlist trade(s). Updating prices…</div>`;
+    if (result.placed > 0 || result.watchlistPlaced > 0 || result.consensusExits > 0) {
+      const parts = [];
+      if (result.placed > 0) parts.push(`${result.placed} consensus`);
+      if (result.watchlistPlaced > 0) parts.push(`${result.watchlistPlaced} watchlist`);
+      if (result.consensusExits > 0) parts.push(`${result.consensusExits} consensus-exit`);
+      el.innerHTML = `<div class="status">${parts.join(' + ')} trade(s). Updating prices…</div>`;
     }
   }
 
+  // Step 2: Update prices
   paper = await updateOpenPrices(paper);
+
+  // Step 3: Auto-close (TP/SL/trailing)
+  const closeResult = runAutoClose(paper);
   savePaper(paper);
 
   const openValue = paper.open.reduce((a, p) => a + p.shares * (p.currentPrice || p.entry), 0);
@@ -1122,8 +1301,15 @@ async function loadPaper() {
   const closedPnl = paper.closed.reduce((a, t) => a + t.pnl, 0);
   const consensusTrades = paper.open.filter(p => p.source === 'consensus');
   const watchlistTrades = paper.open.filter(p => p.source === 'watchlist');
+  const exposurePct = (openValue / PAPER_STARTING_BALANCE * 100).toFixed(0);
 
   let html = '';
+
+  // Auto-close notification
+  if (closeResult.closed > 0) {
+    const reasons = Object.entries(closeResult.reasons).map(([r, c]) => `${c} ${r}`).join(', ');
+    html += `<div class="alert"><strong>Auto-closed ${closeResult.closed} position(s):</strong> ${reasons}</div>`;
+  }
 
   // Strategy controls
   html += '<div class="retro-card" style="margin-bottom:14px">';
@@ -1139,6 +1325,11 @@ async function loadPaper() {
     <span class="muted">${paper.mirrorWatchlist ? `Mirroring ${wlCount} watched insider(s)` : 'Off'}</span>
   </div>`;
   html += `<div class="toggle-row">
+    <span class="toggle-label">Auto-close (TP/SL)</span>
+    <div class="toggle ${paper.autoClose !== false ? 'on' : ''}" onclick="toggleAutoClose()"></div>
+    <span class="muted">${paper.autoClose !== false ? `+${(TAKE_PROFIT_PCT*100).toFixed(0)}% TP · ${(STOP_LOSS_PCT*100).toFixed(0)}% SL · trailing after +${(TRAILING_STOP_TRIGGER*100).toFixed(0)}%` : 'Off — positions stay open until manual close'}</span>
+  </div>`;
+  html += `<div class="toggle-row">
     <span class="toggle-label">Min consensus threshold</span>
     <select onchange="setMinConsensus(this.value)" style="background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
       <option value="6" ${(paper.minConsensus||6)===6?'selected':''}>6+ traders (strong)</option>
@@ -1148,6 +1339,10 @@ async function loadPaper() {
     </select>
     <span class="muted">Higher = fewer trades, stronger signals</span>
   </div>`;
+  html += `<div class="toggle-row">
+    <button id="scout-btn" class="watch-btn" style="padding:6px 14px; font-size:13px" onclick="scoutInsiders()">Scout insiders</button>
+    <span class="muted">Auto-find high-edge fresh wallets and add to watchlist (currently ${wlCount} watched)</span>
+  </div>`;
   html += '</div>';
 
   // Portfolio bar
@@ -1155,12 +1350,13 @@ async function loadPaper() {
   html += `<div><span class="label">Portfolio</span><div class="big">${fmtUsd2(totalValue)}</div></div>`;
   html += `<div><span class="label">Cash</span><div class="big">${fmtUsd2(paper.balance)}</div></div>`;
   html += `<div><span class="label">Invested</span><div class="big">${fmtUsd2(openValue)}</div></div>`;
+  html += `<div><span class="label">Exposure</span><div class="big">${exposurePct}% <span class="muted" style="font-size:12px">/ ${(MAX_EXPOSURE_PCT*100).toFixed(0)}% max</span></div></div>`;
   html += `<div><span class="label">Total return</span><div class="big ${cls(totalReturn)}">${fmtUsd2(totalReturn)} (${(totalReturn / PAPER_STARTING_BALANCE * 100).toFixed(1)}%)</div></div>`;
   html += '</div>';
 
   // Stats tiles
   html += '<div class="tiles">';
-  html += `<div class="tile"><div class="k">Open positions</div><div class="v">${paper.open.length}</div><div class="muted">${consensusTrades.length} consensus · ${watchlistTrades.length} watchlist</div></div>`;
+  html += `<div class="tile"><div class="k">Open positions</div><div class="v">${paper.open.length} / ${MAX_POSITIONS}</div><div class="muted">${consensusTrades.length} consensus · ${watchlistTrades.length} watchlist</div></div>`;
   html += `<div class="tile"><div class="k">Unrealized P&L</div><div class="v ${cls(openPnl)}">${fmtUsd2(openPnl)}</div></div>`;
   html += `<div class="tile"><div class="k">Realized P&L</div><div class="v ${cls(closedPnl)}">${fmtUsd2(closedPnl)}</div></div>`;
   html += `<div class="tile"><div class="k">Total trades</div><div class="v">${paper.open.length + paper.closed.length}</div></div>`;
@@ -1194,6 +1390,8 @@ async function loadPaper() {
     html += `<div class="tile"><div class="k">Total P&L</div><div class="v ${cls(retro.totalPnl)}">${fmtUsd2(retro.totalPnl)}</div></div>`;
     html += `<div class="tile"><div class="k">Win rate</div><div class="v">${retro.winRate}%</div><div class="muted">${retro.wins}W / ${retro.losses}L</div></div>`;
     html += `<div class="tile"><div class="k">Trades</div><div class="v">${retro.total}</div></div>`;
+    html += `<div class="tile"><div class="k">Avg hold</div><div class="v">${retro.avgHoldHrs}h</div></div>`;
+    html += `<div class="tile"><div class="k">Max drawdown</div><div class="v bad">${fmtUsd2(retro.maxDrawdown)}</div></div>`;
     html += '</div>';
 
     if (retro.best) {
@@ -1201,6 +1399,19 @@ async function loadPaper() {
     }
     if (retro.worst && retro.worst !== retro.best) {
       html += `<div><span class="bad" style="font-weight:600">Worst:</span> ${esc(retro.worst.title)} (${esc(retro.worst.outcome)}) — ${fmtUsd2(retro.worst.pnl)}</div>`;
+    }
+
+    // Close reason breakdown
+    const reasons = Object.entries(retro.byReason);
+    if (reasons.length) {
+      html += '<div style="margin-top:10px"><div class="muted" style="margin-bottom:4px">How positions were closed:</div>';
+      html += '<div style="display:flex; gap:8px; flex-wrap:wrap">';
+      const reasonLabels = { 'take-profit': 'Take Profit', 'stop-loss': 'Stop Loss', 'trailing-stop': 'Trailing Stop', 'consensus-exit': 'Consensus Exit', 'manual': 'Manual' };
+      for (const [r, c] of reasons) {
+        const color = r === 'take-profit' ? 'var(--good)' : r === 'stop-loss' ? 'var(--bad)' : 'var(--ink2)';
+        html += `<span class="pill" style="background:rgba(255,255,255,.05);color:${color};padding:4px 10px">${reasonLabels[r] || r}: ${c}</span>`;
+      }
+      html += '</div></div>';
     }
 
     // By source
@@ -1234,16 +1445,18 @@ async function loadPaper() {
   if (paper.closed.length) {
     const sorted = [...paper.closed].sort((a, b) => b.closedAt - a.closedAt);
     html += `<table><thead><tr>
-      <th>Closed</th><th>Market</th><th>Outcome</th><th>Source</th><th>Signal</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">P&L</th>
+      <th>Closed</th><th>Market</th><th>Outcome</th><th>Source</th><th>Exit reason</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">P&L</th>
     </tr></thead><tbody>`;
     for (const t of sorted.slice(0, 50)) {
-      const srcLabel = t.source === 'watchlist' ? `<span class="badge watching">${esc(t.sourceTrader || 'Watchlist')}</span>` : '<span class="badge new">Consensus</span>';
+      const srcLabel = t.source === 'watchlist' ? `<span class="badge watching">${esc(t.sourceTrader || 'WL')}</span>` : '<span class="badge new">Consensus</span>';
+      const reasonLabels = { 'take-profit': 'TP +25%', 'stop-loss': 'SL -20%', 'trailing-stop': 'Trail', 'consensus-exit': 'Cons. exit', 'manual': 'Manual' };
+      const reasonLabel = reasonLabels[t.closeReason] || t.closeReason || 'Manual';
       html += `<tr>
         <td class="muted" style="white-space:nowrap">${new Date(t.closedAt).toLocaleDateString()}</td>
         <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(t.title)}</td>
         <td>${esc(t.outcome)}</td>
         <td>${srcLabel}</td>
-        <td><span class="signal-strength ${t.strength}">${t.traders}${t.source === 'consensus' ? ' traders' : ''}</span></td>
+        <td><span class="muted">${reasonLabel}</span></td>
         <td class="num">${fmtCents(t.entry)}</td>
         <td class="num">${fmtCents(t.exitPrice)}</td>
         <td class="num ${cls(t.pnl)}">${fmtUsd2(t.pnl)}</td>
@@ -1251,21 +1464,20 @@ async function loadPaper() {
     }
     html += '</tbody></table>';
   } else {
-    html += '<div class="status">No closed trades yet. Positions will appear here after you close them or markets settle.</div>';
+    html += '<div class="status">No closed trades yet. Positions will auto-close at +25% (take profit) or -20% (stop loss).</div>';
   }
 
-  html += `<div class="muted" style="margin-top:14px">Paper account started with ${fmtUsd(PAPER_STARTING_BALANCE)} · Created ${new Date(paper.created).toLocaleDateString()} · All trades are simulated — no real money.</div>`;
+  html += `<div class="muted" style="margin-top:14px">Paper account started with ${fmtUsd(PAPER_STARTING_BALANCE)} · Created ${new Date(paper.created).toLocaleDateString()} · Auto-refreshing every 90s · All trades are simulated — no real money.</div>`;
 
   el.innerHTML = html;
 }
 
 function renderPositionTable(allPositions, sourceFilter) {
-  const positions = allPositions.filter(p => p.source === sourceFilter);
   let html = `<table><thead><tr>
     <th>Market</th><th>Outcome</th>`;
   if (sourceFilter === 'consensus') html += '<th>Signal</th>';
   if (sourceFilter === 'watchlist') html += '<th>From</th>';
-  html += `<th class="num">Entry</th><th class="num">Now</th><th class="num">Cost</th><th class="num">Value</th><th class="num">P&L</th><th></th>
+  html += `<th class="num">Entry</th><th class="num">Now</th><th class="num">P&L %</th><th class="num">Cost</th><th class="num">Value</th><th class="num">P&L</th><th></th>
   </tr></thead><tbody>`;
   for (let i = 0; i < allPositions.length; i++) {
     const p = allPositions[i];
@@ -1273,13 +1485,17 @@ function renderPositionTable(allPositions, sourceFilter) {
     const cur = p.currentPrice || p.entry;
     const val = p.shares * cur;
     const pnl = val - p.cost;
-    html += `<tr>
+    const pnlPct = p.cost > 0 ? (pnl / p.cost * 100).toFixed(1) : '0.0';
+    const nearTP = pnl / p.cost >= TAKE_PROFIT_PCT * 0.8;
+    const nearSL = pnl / p.cost <= STOP_LOSS_PCT * 0.8;
+    html += `<tr${nearTP ? ' style="background:rgba(74,222,128,.05)"' : nearSL ? ' style="background:rgba(248,113,113,.05)"' : ''}>
       <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
       <td>${esc(p.outcome)}</td>`;
     if (sourceFilter === 'consensus') html += `<td><span class="signal-strength ${p.strength}">${p.traders} traders</span></td>`;
     if (sourceFilter === 'watchlist') html += `<td><span class="muted">${esc(p.sourceTrader || '?')}</span></td>`;
     html += `<td class="num">${fmtCents(p.entry)}</td>
       <td class="num">${fmtCents(cur)}</td>
+      <td class="num ${cls(pnl)}" style="font-weight:600">${pnlPct}%</td>
       <td class="num">${fmtUsd2(p.cost)}</td>
       <td class="num">${fmtUsd2(val)}</td>
       <td class="num ${cls(pnl)}">${fmtUsd2(pnl)}</td>
@@ -1292,6 +1508,8 @@ function renderPositionTable(allPositions, sourceFilter) {
 
 // Auto-refresh watchlist every 60s
 watchlistTimer = setInterval(() => { if (currentTab === 'watchlist') loadWatchlist(); }, 60000);
+// Auto-refresh paper trading every 90s
+paperAutoTimer = setInterval(() => { if (currentTab === 'paper') loadPaper(); }, 90000);
 loadSignals();
 </script>
 </body>
