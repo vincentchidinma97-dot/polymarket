@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polymarket Insider Tracker</title>
+<style>
+  :root {
+    --bg: #0f1115; --surface: #171a21; --surface2: #1e222b;
+    --border: #2a2f3a; --ink: #e8eaf0; --ink2: #9aa3b2; --ink3: #6b7382;
+    --good: #4ade80; --bad: #f87171; --accent: #818cf8; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, "SF Pro Text", Segoe UI, sans-serif; padding: 16px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: var(--ink3); font-size: 12px; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs button, .controls select, .controls button {
+    background: var(--surface); color: var(--ink2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+  }
+  .tabs button.active { color: var(--ink); border-color: var(--accent); background: var(--surface2); }
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .controls label { color: var(--ink3); font-size: 12px; }
+  .controls button.on { border-color: var(--good); color: var(--ink); }
+  table { width: 100%; min-width: 580px; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th { text-align: left; color: var(--ink3); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 500; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr.click { cursor: pointer; }
+  tbody tr.click:hover { background: var(--surface2); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th.num { text-align: right; }
+  .good { color: var(--good); } .bad { color: var(--bad); }
+  .muted { color: var(--ink3); font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill.buy { background: rgba(74,222,128,.12); color: var(--good); }
+  .pill.sell { background: rgba(248,113,113,.12); color: var(--bad); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile .k { color: var(--ink3); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .tile .v { font-size: 20px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .back { color: var(--accent); cursor: pointer; font-size: 13px; margin-bottom: 10px; display: inline-block; background: none; border: none; padding: 0; }
+  a { color: var(--accent); text-decoration: none; }
+  h2 { font-size: 14px; font-weight: 600; margin: 18px 0 8px; }
+  .status { color: var(--ink3); font-size: 12px; padding: 20px; text-align: center; }
+  .traderlink { color: var(--ink); cursor: pointer; }
+  .traderlink:hover { color: var(--accent); }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; margin-left: 6px; }
+  .badge.new { background: rgba(129,140,248,.15); color: var(--accent); }
+  .badge.hot { background: rgba(251,191,36,.15); color: #fbbf24; }
+  .badge.watching { background: rgba(74,222,128,.15); color: var(--good); }
+  .scroll { overflow-x: auto; }
+  .watch-btn {
+    background: none; border: 1px solid var(--border); color: var(--ink3); border-radius: 6px;
+    padding: 2px 8px; font-size: 11px; cursor: pointer; white-space: nowrap;
+  }
+  .watch-btn:hover { border-color: var(--accent); color: var(--ink); }
+  .watch-btn.active { border-color: var(--good); color: var(--good); }
+  .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--good); margin-right: 6px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 10px; cursor: pointer; }
+  .card:hover { border-color: var(--accent); }
+  .card-head { display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 6px; }
+  .alert { background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; font-size: 13px; }
+  .alert strong { color: var(--warn); }
+  .signal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+  .signal-card.high { border-left: 3px solid var(--good); }
+  .signal-card.med { border-left: 3px solid var(--warn); }
+  .signal-card.low { border-left: 3px solid var(--ink3); }
+  .signal-strength { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 4px; }
+  .signal-strength.high { background: rgba(74,222,128,.12); color: var(--good); }
+  .signal-strength.med { background: rgba(251,191,36,.12); color: var(--warn); }
+  .signal-strength.low { background: rgba(107,115,130,.15); color: var(--ink3); }
+  .trader-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .trader-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+  .trader-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .copyable-tag { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+  .copyable-tag.yes { background: rgba(74,222,128,.12); color: var(--good); }
+  .copyable-tag.late { background: rgba(248,113,113,.12); color: var(--bad); }
+  .section-header { display: flex; align-items: center; gap: 8px; margin: 20px 0 10px; }
+  .section-header h2 { margin: 0; }
+  .section-count { background: var(--surface2); color: var(--ink2); font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+  .port-bar { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 14px; }
+  .port-bar .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .port-bar .label { color: var(--ink3); font-size: 12px; }
+  .retro-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .retro-card h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+  .toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .toggle-label { color: var(--ink2); font-size: 13px; }
+  .toggle { position: relative; width: 40px; height: 22px; background: var(--border); border-radius: 11px; cursor: pointer; transition: background .2s; }
+  .toggle.on { background: var(--good); }
+  .toggle::after { content:''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: var(--ink); border-radius: 50%; transition: transform .2s; }
+  .toggle.on::after { transform: translateX(18px); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Polymarket Insider Tracker</h1>
+  <div class="sub">Track profitable new wallets, watch their moves, and study betting patterns. Research tool only; not financial advice.</div>
+
+  <div class="tabs">
+    <button id="tab-signals" class="active" onclick="showTab('signals')">Signals</button>
+    <button id="tab-watchlist" onclick="showTab('watchlist')">Watchlist</button>
+    <button id="tab-new" onclick="showTab('new')">New Winners</button>
+    <button id="tab-lb" onclick="showTab('lb')">Leaderboard</button>
+    <button id="tab-whale" onclick="showTab('whale')">Whale Feed</button>
+    <button id="tab-paper" onclick="showTab('paper')">Paper Trading</button>
+  </div>
+
+  <div id="view-signals">
+    <div class="controls">
+      <span class="live-dot"></span>
+      <label>Smart money consensus + copyable entries from top 50 traders</label>
+      <button onclick="loadSignals()">Refresh</button>
+    </div>
+    <div id="signals-body" class="scroll"><div class="status">Loading signals — scanning top traders' positions…</div></div>
+  </div>
+
+  <div id="view-watchlist" style="display:none">
+    <div class="controls">
+      <span class="live-dot"></span>
+      <label id="watchlist-status">Auto-refreshing every 60s</label>
+      <button onclick="loadWatchlist()">Refresh now</button>
+      <button id="export-btn" onclick="exportWatchlist()">Export list</button>
+      <button id="import-btn" onclick="document.getElementById('import-file').click()">Import list</button>
+      <input type="file" id="import-file" accept=".json" style="display:none" onchange="importWatchlist(event)">
+    </div>
+    <div id="watchlist-body" class="scroll"><div class="status">Loading watchlist…</div></div>
+  </div>
+
+  <div id="view-new" style="display:none">
+    <div class="controls">
+      <label>7-day winners with &lt;100 lifetime positions — new or fresh accounts worth watching.</label>
+    </div>
+    <div id="new-body" class="scroll"><div class="status">Loading…</div></div>
+  </div>
+
+  <div id="view-lb" style="display:none">
+    <div class="controls">
+      <label>Window</label>
+      <select id="lb-window" onchange="loadLeaderboard()">
+        <option value="1d">Today</option>
+        <option value="1w" selected>7 days</option>
+        <option value="1m">30 days</option>
+        <option value="all">All time</option>
+      </select>
+      <label>Rank by</label>
+      <select id="lb-rank" onchange="loadLeaderboard()">
+        <option value="pnl" selected>Profit</option>
+        <option value="vol">Volume</option>
+      </select>
+    </div>
+    <div id="lb-body" class="scroll"><div class="status">Loading…</div></div>
+  </div>
+
+  <div id="view-whale" style="display:none">
+    <div class="controls">
+      <label>Min trade size</label>
+      <select id="whale-min" onchange="loadWhales()">
+        <option value="1000">$1,000+</option>
+        <option value="5000" selected>$5,000+</option>
+        <option value="10000">$10,000+</option>
+        <option value="25000">$25,000+</option>
+      </select>
+      <button id="whale-auto" onclick="toggleWhaleAuto()">Auto-refresh: off</button>
+      <button onclick="loadWhales()">Refresh</button>
+    </div>
+    <div id="whale-body" class="scroll"><div class="status">Loading…</div></div>
+  </div>
+
+  <div id="view-paper" style="display:none">
+    <div class="controls">
+      <span class="live-dot"></span>
+      <label>Simulated portfolio — auto-trades based on signal strength</label>
+      <button onclick="loadPaper()">Refresh</button>
+      <button onclick="resetPaper()">Reset account</button>
+    </div>
+    <div id="paper-body" class="scroll"><div class="status">Loading…</div></div>
+  </div>
+
+  <div id="view-trader" style="display:none">
+    <button class="back" onclick="backFromTrader()">&larr; Back</button>
+    <div id="trader-body" class="scroll"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentTab = 'signals', prevTab = 'signals', whaleAutoTimer = null, watchlistTimer = null;
+
+const fmtUsd = n => (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const fmtUsd2 = n => (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtCents = p => (p * 100).toFixed(1) + '¢';
+const cls = n => n > 0 ? 'good' : n < 0 ? 'bad' : '';
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short = w => w ? w.slice(0, 6) + '…' + w.slice(-4) : '';
+const displayName = u => {
+  if (!u.userName || /^0x[0-9a-fA-F]{40}/.test(u.userName)) return short(u.proxyWallet);
+  return u.userName;
+};
+const ago = ts => {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+};
+
+async function api(endpoint, params) {
+  const q = new URLSearchParams({ endpoint, ...params }).toString();
+  const r = await fetch(`/api/proxy?${q}`);
+  if (!r.ok) throw new Error(`${endpoint}: HTTP ${r.status}`);
+  return r.json();
+}
+
+/* ============ WATCHLIST (localStorage) ============ */
+function getWatchlist() {
+  try { return JSON.parse(localStorage.getItem('pm_watchlist') || '{}'); } catch { return {}; }
+}
+function saveWatchlist(wl) { localStorage.setItem('pm_watchlist', JSON.stringify(wl)); }
+function isWatching(wallet) { return !!getWatchlist()[wallet]; }
+
+function toggleWatch(wallet, name, e) {
+  if (e) e.stopPropagation();
+  const wl = getWatchlist();
+  if (wl[wallet]) { delete wl[wallet]; }
+  else { wl[wallet] = { name, addedAt: Date.now(), lastPositionCount: null }; }
+  saveWatchlist(wl);
+  if (currentTab === 'watchlist') loadWatchlist();
+  // Update all watch buttons on page
+  document.querySelectorAll(`[data-wallet="${wallet}"]`).forEach(btn => {
+    btn.classList.toggle('active', !!wl[wallet]);
+    btn.textContent = wl[wallet] ? 'Watching' : '+ Watch';
+  });
+}
+
+function watchBtnHtml(wallet, name) {
+  const active = isWatching(wallet);
+  return `<button class="watch-btn ${active ? 'active' : ''}" data-wallet="${esc(wallet)}" onclick="toggleWatch('${esc(wallet)}','${esc(name)}',event)">${active ? 'Watching' : '+ Watch'}</button>`;
+}
+
+function exportWatchlist() {
+  const wl = getWatchlist();
+  const blob = new Blob([JSON.stringify(wl, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'polymarket-watchlist.json';
+  a.click();
+}
+
+function importWatchlist(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const current = getWatchlist();
+      Object.assign(current, data);
+      saveWatchlist(current);
+      loadWatchlist();
+    } catch { alert('Invalid watchlist file'); }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+/* ============ TABS ============ */
+const ALL_TABS = ['signals', 'watchlist', 'new', 'lb', 'whale', 'paper'];
+function showTab(tab) {
+  currentTab = tab;
+  for (const t of ALL_TABS) {
+    $('tab-' + t).classList.toggle('active', t === tab);
+    $('view-' + t).style.display = t === tab ? '' : 'none';
+  }
+  $('view-trader').style.display = 'none';
+  if (tab === 'signals') loadSignals();
+  if (tab === 'watchlist') loadWatchlist();
+  if (tab === 'new') loadNewWinners();
+  if (tab === 'lb') loadLeaderboard();
+  if (tab === 'whale') loadWhales();
+  if (tab === 'paper') loadPaper();
+}
+
+/* ============ SIGNALS ENGINE ============ */
+async function loadSignals() {
+  const el = $('signals-body');
+  el.innerHTML = '<div class="status">Scanning top 50 traders\' open positions for consensus and copyable entries…<br>This takes ~15 seconds.</div>';
+  try {
+    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
+    const profitable = lb.filter(u => u.pnl > 0);
+
+    // Fetch open positions for each top trader
+    const traders = await Promise.all(profitable.map(async u => {
+      try {
+        const pos = await api('positions', { user: u.proxyWallet, limit: 200, sortBy: 'CURRENT', sortDirection: 'DESC' });
+        const open = pos.filter(p => p.currentValue > 1);
+        return { ...u, open, totalPositions: pos.length };
+      } catch { return { ...u, open: [], totalPositions: null }; }
+    }));
+
+    // --- CONSENSUS: group positions by market+outcome ---
+    const consensus = {};
+    for (const t of traders) {
+      for (const p of t.open) {
+        const key = `${p.title}|||${p.outcome}`;
+        if (!consensus[key]) consensus[key] = { title: p.title, outcome: p.outcome, slug: p.slug, traders: [], totalValue: 0 };
+        consensus[key].traders.push({
+          wallet: t.proxyWallet, name: displayName(t), rank: t.rank, pnl: t.pnl,
+          value: p.currentValue, entry: p.avgPrice, now: p.curPrice, cashPnl: p.cashPnl
+        });
+        consensus[key].totalValue += p.currentValue;
+      }
+    }
+
+    const consensusSignals = Object.values(consensus)
+      .filter(c => c.traders.length >= 2)
+      .sort((a, b) => b.traders.length - a.traders.length || b.totalValue - a.totalValue);
+
+    // --- STILL COPYABLE: positions where current price is within 20% of entry ---
+    const copyablePositions = [];
+    for (const t of traders) {
+      for (const p of t.open) {
+        if (p.curPrice > 0 && p.avgPrice > 0 && p.currentValue > 100) {
+          const gap = Math.abs(p.curPrice - p.avgPrice) / p.avgPrice;
+          if (gap <= 0.20) {
+            copyablePositions.push({
+              ...p, traderName: displayName(t), traderWallet: t.proxyWallet,
+              traderRank: t.rank, traderPnl: t.pnl, gap
+            });
+          }
+        }
+      }
+    }
+    copyablePositions.sort((a, b) => a.gap - b.gap);
+
+    // --- FRESH WALLET LARGE BETS ---
+    const freshWallets = traders
+      .filter(t => t.totalPositions !== null && t.totalPositions < 30 && t.open.length > 0)
+      .sort((a, b) => a.totalPositions - b.totalPositions);
+
+    // --- SECTOR CONCENTRATION ---
+    const sectors = {};
+    for (const t of traders) {
+      for (const p of t.open) {
+        let sector = 'Other';
+        const title = (p.title || '').toLowerCase();
+        if (/bitcoin|btc|ethereum|eth|crypto|solana|sol|xrp/i.test(title)) sector = 'Crypto';
+        else if (/trump|biden|president|senate|congress|governor|election|democrat|republican|political|party/i.test(title)) sector = 'Politics';
+        else if (/fed|interest rate|inflation|gdp|recession|tariff|cpi/i.test(title)) sector = 'Macro/Fed';
+        else if (/nba|nfl|mlb|nhl|soccer|football|tennis|ufc|mma|boxing|cricket|esport|lol|cs2|dota|league|counter-strike|game \d|winner/i.test(title)) sector = 'Sports/Esports';
+        else if (/ai |openai|google|apple|meta |microsoft|tesla|stock|s&p|nasdaq/i.test(title)) sector = 'Tech/AI';
+        sectors[sector] = (sectors[sector] || 0) + p.currentValue;
+      }
+    }
+    const sectorList = Object.entries(sectors).sort((a, b) => b[1] - a[1]);
+    const totalExposed = sectorList.reduce((a, [, v]) => a + v, 0);
+
+    // --- RENDER ---
+    let html = '';
+
+    // Summary tiles
+    html += '<div class="tiles">';
+    html += `<div class="tile"><div class="k">Consensus plays</div><div class="v">${consensusSignals.length}</div><div class="muted">markets w/ 2+ top traders</div></div>`;
+    html += `<div class="tile"><div class="k">Still copyable</div><div class="v">${copyablePositions.length}</div><div class="muted">within 20% of entry</div></div>`;
+    html += `<div class="tile"><div class="k">Fresh wallets active</div><div class="v">${freshWallets.length}</div><div class="muted">&lt;30 lifetime positions</div></div>`;
+    html += `<div class="tile"><div class="k">Smart money exposed</div><div class="v">${fmtUsd(totalExposed)}</div><div class="muted">across ${profitable.length} traders</div></div>`;
+    html += '</div>';
+
+    // Sector breakdown
+    if (sectorList.length) {
+      html += '<div class="section-header"><h2>Where smart money is concentrated</h2></div>';
+      html += '<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px">';
+      for (const [name, val] of sectorList) {
+        const pct = totalExposed > 0 ? Math.round(val / totalExposed * 100) : 0;
+        html += `<div class="tile" style="flex:1; min-width:120px"><div class="k">${esc(name)}</div><div class="v">${pct}%</div><div class="muted">${fmtUsd(val)}</div></div>`;
+      }
+      html += '</div>';
+    }
+
+    // Consensus signals
+    html += `<div class="section-header"><h2>Consensus plays</h2><span class="section-count">${consensusSignals.length}</span></div>`;
+    html += '<div class="muted" style="margin-bottom:10px">Markets where multiple top-50 profitable traders hold the same position. More traders = stronger signal.</div>';
+
+    for (const c of consensusSignals.slice(0, 20)) {
+      const strength = c.traders.length >= 4 ? 'high' : c.traders.length >= 3 ? 'med' : 'low';
+      const avgEntry = c.traders.reduce((a, t) => a + t.entry, 0) / c.traders.length;
+      const avgNow = c.traders.reduce((a, t) => a + t.now, 0) / c.traders.length;
+      const gap = avgEntry > 0 ? Math.abs(avgNow - avgEntry) / avgEntry : 1;
+      const stillCopyable = gap <= 0.20;
+
+      html += `<div class="signal-card ${strength}">
+        <div style="display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:6px">
+          <div>
+            <span class="signal-strength ${strength}">${c.traders.length} traders agree</span>
+            ${stillCopyable ? '<span class="copyable-tag yes">Still copyable</span>' : '<span class="copyable-tag late">Price moved</span>'}
+            <div style="font-size:15px; font-weight:600; margin-top:4px">${esc(c.title)}</div>
+            <div class="muted">Outcome: <strong style="color:var(--ink)">${esc(c.outcome)}</strong></div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:15px; font-weight:600">${fmtUsd(c.totalValue)} exposed</div>
+            <div class="muted">Avg entry: ${fmtCents(avgEntry)} · Now: ${fmtCents(avgNow)}</div>
+          </div>
+        </div>
+        <div class="trader-chips">
+          ${c.traders.map(t => `<span class="trader-chip" onclick="openTrader('${esc(t.wallet)}','${esc(t.name)}')">${esc(t.name)} <span class="muted">#${t.rank} · ${fmtUsd(t.value)}</span></span>`).join('')}
+        </div>
+      </div>`;
+    }
+
+    if (!consensusSignals.length) html += '<div class="status">No consensus plays found — top traders are spread across different markets right now.</div>';
+
+    // Still copyable
+    html += `<div class="section-header"><h2>Still copyable entries</h2><span class="section-count">${copyablePositions.length}</span></div>`;
+    html += '<div class="muted" style="margin-bottom:10px">Positions from top traders where the current price is within 20% of their entry — you can still get a similar price.</div>';
+
+    if (copyablePositions.length) {
+      html += `<table><thead><tr>
+        <th>Trader</th><th>Market</th><th>Outcome</th><th class="num">Their entry</th><th class="num">Now</th><th class="num">Gap</th><th class="num">Their value</th>
+      </tr></thead><tbody>`;
+      for (const p of copyablePositions.slice(0, 30)) {
+        const gapPct = (p.gap * 100).toFixed(1);
+        html += `<tr class="click" onclick="openTrader('${esc(p.traderWallet)}','${esc(p.traderName)}')">
+          <td><span class="traderlink">${esc(p.traderName)}</span><div class="muted">#${p.traderRank} · ${fmtUsd(p.traderPnl)} PnL</div></td>
+          <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
+          <td>${esc(p.outcome)}</td>
+          <td class="num">${fmtCents(p.avgPrice)}</td>
+          <td class="num">${fmtCents(p.curPrice)}</td>
+          <td class="num" style="color:${p.gap < 0.05 ? 'var(--good)' : p.gap < 0.15 ? 'var(--warn)' : 'var(--bad)'}">${gapPct}%</td>
+          <td class="num">${fmtUsd(p.currentValue)}</td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="status">No positions within 20% of entry right now.</div>';
+    }
+
+    // Fresh wallets
+    html += `<div class="section-header"><h2>Fresh wallet alerts</h2><span class="section-count">${freshWallets.length}</span></div>`;
+    html += '<div class="muted" style="margin-bottom:10px">Top-50 profitable traders with fewer than 30 lifetime positions — likely alt accounts from experienced traders.</div>';
+
+    for (const t of freshWallets.slice(0, 10)) {
+      const name = displayName(t);
+      const eff = t.vol > 0 ? (t.pnl / t.vol) : null;
+      const top2 = t.open.slice(0, 2);
+      html += `<div class="signal-card med" style="cursor:pointer" onclick="openTrader('${esc(t.proxyWallet)}','${esc(name)}')">
+        <div style="display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:6px">
+          <div>
+            <span style="font-weight:600">${esc(name)}</span>
+            <span class="badge new">Fresh</span>
+            ${eff !== null && eff > 0.3 ? '<span class="badge hot">High edge</span>' : ''}
+            ${watchBtnHtml(t.proxyWallet, name)}
+            <div class="muted">${t.totalPositions} lifetime positions · Rank #${t.rank} this week</div>
+          </div>
+          <div style="text-align:right">
+            <div class="good" style="font-weight:600">${fmtUsd(t.pnl)} profit</div>
+            <div class="muted">${t.open.length} open positions</div>
+          </div>
+        </div>
+        ${top2.length ? '<div style="margin-top:6px; font-size:12px; color:var(--ink2)">Holding: ' +
+          top2.map(p => `${esc(p.title)} (${esc(p.outcome)} @ ${fmtCents(p.curPrice)})`).join(' · ') +
+          (t.open.length > 2 ? ` + ${t.open.length - 2} more` : '') + '</div>' : ''}
+      </div>`;
+    }
+
+    if (!freshWallets.length) html += '<div class="status">No fresh wallets in the top 50 this week.</div>';
+
+    el.innerHTML = html;
+  } catch (e) { el.innerHTML = `<div class="status">Failed to load signals: ${esc(e.message)}</div>`; }
+}
+
+/* ============ WATCHLIST VIEW ============ */
+async function loadWatchlist() {
+  const el = $('watchlist-body');
+  const wl = getWatchlist();
+  const wallets = Object.keys(wl);
+
+  if (!wallets.length) {
+    el.innerHTML = `<div class="status" style="padding:40px">
+      <div style="font-size:16px; color:var(--ink); margin-bottom:8px">No insiders on your watchlist yet</div>
+      <div>Go to <strong>New Winners</strong> or <strong>Leaderboard</strong> and click <strong>+ Watch</strong> on any trader to start tracking them.</div>
+    </div>`;
+    return;
+  }
+
+  if (!el.querySelector('.card')) el.innerHTML = '<div class="status">Loading watchlist…</div>';
+
+  try {
+    const results = await Promise.all(wallets.map(async wallet => {
+      const info = wl[wallet];
+      try {
+        const [positions, trades] = await Promise.all([
+          api('positions', { user: wallet, limit: 200, sortBy: 'CURRENT', sortDirection: 'DESC' }),
+          api('trades', { user: wallet, limit: 50, takerOnly: 'true' }),
+        ]);
+        const open = positions.filter(p => p.currentValue > 1);
+        const openValue = open.reduce((a, p) => a + p.currentValue, 0);
+        const unrealized = open.reduce((a, p) => a + p.cashPnl, 0);
+
+        // Detect new positions since last check
+        const prevCount = info.lastPositionCount;
+        const newPositions = prevCount !== null && open.length > prevCount ? open.length - prevCount : 0;
+        wl[wallet].lastPositionCount = open.length;
+
+        const recentTrades = trades.filter(t => (Date.now() / 1000 - t.timestamp) < 3600);
+
+        return { wallet, name: info.name, open, openValue, unrealized, trades, recentTrades, newPositions, ok: true };
+      } catch (e) { return { wallet, name: info.name, ok: false, error: e.message }; }
+    }));
+
+    saveWatchlist(wl);
+
+    const alerts = results.filter(r => r.ok && (r.newPositions > 0 || r.recentTrades.length > 0));
+
+    let html = '';
+
+    if (alerts.length) {
+      html += '<div class="alert"><strong>Activity detected:</strong> ';
+      html += alerts.map(r => {
+        const parts = [];
+        if (r.newPositions > 0) parts.push(`${r.newPositions} new position(s)`);
+        if (r.recentTrades.length > 0) parts.push(`${r.recentTrades.length} trade(s) in last hour`);
+        return `<strong>${esc(r.name)}</strong> — ${parts.join(', ')}`;
+      }).join(' · ');
+      html += '</div>';
+    }
+
+    html += `<div class="muted" style="margin-bottom:10px">Tracking ${wallets.length} insider(s) · Last refreshed ${new Date().toLocaleTimeString()}</div>`;
+
+    for (const r of results) {
+      if (!r.ok) {
+        html += `<div class="card"><div class="card-head"><span>${esc(r.name)}</span><span class="muted">Error: ${esc(r.error)}</span></div></div>`;
+        continue;
+      }
+      const top3 = r.open.slice(0, 3);
+      html += `<div class="card" onclick="openTrader('${esc(r.wallet)}','${esc(r.name)}')">
+        <div class="card-head">
+          <div>
+            <span style="font-weight:600; font-size:15px">${esc(r.name)}</span>
+            <span class="badge watching">Watching</span>
+            ${r.recentTrades.length ? '<span class="badge hot">Active now</span>' : ''}
+            <div class="muted">${short(r.wallet)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:15px; font-weight:600">${r.open.length} open · ${fmtUsd(r.openValue)}</div>
+            <div class="muted ${cls(r.unrealized)}">Unrealized: ${fmtUsd(r.unrealized)}</div>
+          </div>
+        </div>`;
+
+      if (top3.length) {
+        html += `<div style="margin-top:10px"><table style="min-width:auto"><thead><tr>
+          <th>Market</th><th>Outcome</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Value</th><th class="num">P&L</th>
+        </tr></thead><tbody>` +
+        top3.map(p => `<tr>
+          <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
+          <td>${esc(p.outcome)}</td>
+          <td class="num">${fmtCents(p.avgPrice)}</td>
+          <td class="num">${fmtCents(p.curPrice)}</td>
+          <td class="num">${fmtUsd2(p.currentValue)}</td>
+          <td class="num ${cls(p.cashPnl)}">${fmtUsd(p.cashPnl)}</td>
+        </tr>`).join('') +
+        (r.open.length > 3 ? `<tr><td colspan="6" class="muted">+ ${r.open.length - 3} more positions</td></tr>` : '') +
+        '</tbody></table></div>';
+      } else {
+        html += '<div class="muted" style="margin-top:8px">No open positions right now</div>';
+      }
+
+      if (r.recentTrades.length) {
+        html += `<div style="margin-top:8px; font-size:12px; color:var(--warn)">Recent trades: ` +
+          r.recentTrades.slice(0, 3).map(t =>
+            `<span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span> ${esc(t.title)} @ ${fmtCents(t.price)}`
+          ).join(' · ') + '</div>';
+      }
+
+      html += '</div>';
+    }
+
+    el.innerHTML = html;
+  } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
+}
+
+/* ============ LEADERBOARD ============ */
+async function loadLeaderboard() {
+  const el = $('lb-body');
+  el.innerHTML = '<div class="status">Loading…</div>';
+  try {
+    const rows = await api('leaderboard', { window: $('lb-window').value, rankType: $('lb-rank').value, limit: 25 });
+    el.innerHTML = `<table><thead><tr>
+        <th>#</th><th>Trader</th><th></th><th class="num">Profit</th><th class="num">Volume</th><th class="num">Profit / $ traded</th>
+      </tr></thead><tbody>` +
+      rows.map(u => {
+        const eff = u.vol > 0 ? (u.pnl / u.vol) : null;
+        const name = displayName(u);
+        return `<tr class="click" onclick="openTrader('${esc(u.proxyWallet)}','${esc(name)}')">
+          <td class="muted">${esc(u.rank)}</td>
+          <td><span class="traderlink">${esc(name)}</span><div class="muted">${short(u.proxyWallet)}</div></td>
+          <td>${watchBtnHtml(u.proxyWallet, name)}</td>
+          <td class="num ${cls(u.pnl)}">${fmtUsd(u.pnl)}</td>
+          <td class="num">${fmtUsd(u.vol)}</td>
+          <td class="num muted">${eff === null ? '—' : (eff * 100).toFixed(1) + '%'}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+  } catch (e) { el.innerHTML = `<div class="status">Failed to load: ${esc(e.message)}</div>`; }
+}
+
+/* ============ NEW WINNERS ============ */
+async function loadNewWinners() {
+  const el = $('new-body');
+  el.innerHTML = '<div class="status">Loading — scanning 7-day winners, fetching positions for each…</div>';
+  try {
+    const weekly = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
+    const profitable = weekly.filter(u => u.pnl > 0);
+
+    const enriched = await Promise.all(profitable.map(async u => {
+      try {
+        const positions = await api('positions', { user: u.proxyWallet, limit: 200 });
+        const open = positions.filter(p => p.currentValue > 1);
+        const openValue = open.reduce((a, p) => a + p.currentValue, 0);
+        return { ...u, totalPositions: positions.length, capped: positions.length >= 200, openPositions: open, openValue };
+      } catch { return { ...u, totalPositions: null, capped: false, openPositions: [], openValue: 0 }; }
+    }));
+
+    const newTraders = enriched.filter(u => u.totalPositions !== null && !u.capped && u.totalPositions < 100);
+
+    if (!newTraders.length) {
+      el.innerHTML = '<div class="status">All top 7-day winners have 100+ lifetime positions — no fresh accounts found this week.</div>';
+      return;
+    }
+
+    const copyable = newTraders.filter(u => u.openPositions.length > 0).sort((a, b) => b.openValue - a.openValue);
+    const ghosts = newTraders.filter(u => u.openPositions.length === 0).sort((a, b) => b.pnl - a.pnl);
+
+    let html = '';
+
+    html += `<h2 style="margin-top:4px">Copyable — ${copyable.length} new accounts with open positions</h2>`;
+    html += '<div class="muted" style="margin-bottom:10px">These traders are winning AND still have live positions you can study or follow.</div>';
+    if (copyable.length) {
+      html += copyable.map(u => {
+        const eff = u.vol > 0 ? (u.pnl / u.vol) : null;
+        const isFresh = u.totalPositions < 30;
+        const name = displayName(u);
+        const top3 = u.openPositions.slice(0, 3);
+        return `<div class="card" onclick="openTrader('${esc(u.proxyWallet)}','${esc(name)}')">
+          <div class="card-head">
+            <div>
+              <span class="traderlink" style="font-weight:600; font-size:15px">${esc(name)}</span>
+              ${isFresh ? '<span class="badge new">Fresh</span>' : ''}
+              ${eff !== null && eff > 0.3 ? '<span class="badge hot">High edge</span>' : ''}
+              ${watchBtnHtml(u.proxyWallet, name)}
+              <div class="muted">${short(u.proxyWallet)} · ${u.totalPositions} lifetime positions</div>
+            </div>
+            <div style="text-align:right">
+              <div class="good" style="font-size:16px; font-weight:600">${fmtUsd(u.pnl)} profit</div>
+              <div class="muted">${fmtUsd(u.vol)} vol · ${eff !== null ? (eff * 100).toFixed(1) + '% eff' : ''}</div>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <div style="font-size:11px; color:var(--ink3); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px">Open positions (${u.openPositions.length}) · ${fmtUsd(u.openValue)} exposed</div>
+            <table style="min-width:auto"><thead><tr>
+              <th>Market</th><th>Outcome</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Value</th><th class="num">P&L</th>
+            </tr></thead><tbody>` +
+            top3.map(p => `<tr>
+              <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
+              <td>${esc(p.outcome)}</td>
+              <td class="num">${fmtCents(p.avgPrice)}</td>
+              <td class="num">${fmtCents(p.curPrice)}</td>
+              <td class="num">${fmtUsd2(p.currentValue)}</td>
+              <td class="num ${cls(p.cashPnl)}">${fmtUsd(p.cashPnl)}</td>
+            </tr>`).join('') +
+            (u.openPositions.length > 3 ? `<tr><td colspan="6" class="muted">+ ${u.openPositions.length - 3} more — click to see all</td></tr>` : '') +
+            `</tbody></table></div></div>`;
+      }).join('');
+    } else {
+      html += '<div class="status">No new accounts with open positions right now.</div>';
+    }
+
+    html += `<h2>Ghost Profiteers — ${ghosts.length} accounts with no open positions</h2>`;
+    html += '<div class="muted" style="margin-bottom:10px">Settled profits — nothing to copy now, but add to watchlist to catch their next move.</div>';
+    if (ghosts.length) {
+      html += `<table><thead><tr>
+          <th>#</th><th>Trader</th><th></th><th class="num">7d Profit</th><th class="num">7d Volume</th><th class="num">Positions</th>
+        </tr></thead><tbody>` +
+        ghosts.map((u, i) => {
+          const name = displayName(u);
+          return `<tr class="click" onclick="openTrader('${esc(u.proxyWallet)}','${esc(name)}')">
+            <td class="muted">${i + 1}</td>
+            <td><span class="traderlink">${esc(name)}</span><div class="muted">${short(u.proxyWallet)}</div></td>
+            <td>${watchBtnHtml(u.proxyWallet, name)}</td>
+            <td class="num good">${fmtUsd(u.pnl)}</td>
+            <td class="num">${u.vol > 0 ? fmtUsd(u.vol) : '—'}</td>
+            <td class="num">${u.totalPositions}</td>
+          </tr>`;
+        }).join('') + '</tbody></table>';
+    }
+
+    html += `<div class="muted" style="margin-top:10px">${newTraders.length} new account(s). ${copyable.length} copyable, ${ghosts.length} ghosts.</div>`;
+    el.innerHTML = html;
+  } catch (e) { el.innerHTML = `<div class="status">Failed to load: ${esc(e.message)}</div>`; }
+}
+
+/* ============ WHALE FEED ============ */
+async function loadWhales() {
+  const el = $('whale-body');
+  if (!el.querySelector('table')) el.innerHTML = '<div class="status">Loading…</div>';
+  try {
+    const rows = await api('trades', { limit: 60, takerOnly: 'true', filterType: 'CASH', filterAmount: $('whale-min').value });
+
+    // Check each whale trader's position count to flag fresh wallets
+    const uniqueWallets = [...new Set(rows.map(t => t.proxyWallet))];
+    const walletInfo = {};
+    await Promise.all(uniqueWallets.slice(0, 20).map(async w => {
+      try {
+        const pos = await api('positions', { user: w, limit: 30 });
+        walletInfo[w] = pos.length;
+      } catch { walletInfo[w] = null; }
+    }));
+
+    el.innerHTML = `<table><thead><tr>
+        <th>When</th><th>Trader</th><th></th><th>Side</th><th>Market</th><th>Outcome</th><th class="num">Price</th><th class="num">Amount</th>
+      </tr></thead><tbody>` +
+      rows.map(t => {
+        const name = t.name || short(t.proxyWallet);
+        const posCount = walletInfo[t.proxyWallet];
+        const isFresh = posCount !== null && posCount !== undefined && posCount < 20;
+        return `<tr${isFresh ? ' style="background:rgba(251,191,36,.04)"' : ''}>
+          <td class="muted" style="white-space:nowrap">${ago(t.timestamp)}</td>
+          <td>
+            <span class="traderlink" onclick="openTrader('${esc(t.proxyWallet)}','${esc(name)}')">${esc(name)}</span>
+            ${isFresh ? '<span class="badge new">New wallet</span>' : ''}
+            ${posCount !== null && posCount !== undefined ? `<div class="muted">${posCount} positions</div>` : ''}
+          </td>
+          <td>${watchBtnHtml(t.proxyWallet, name)}</td>
+          <td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${esc(t.side)}</span></td>
+          <td>${esc(t.title)}</td>
+          <td>${esc(t.outcome)}</td>
+          <td class="num">${fmtCents(t.price)}</td>
+          <td class="num">${fmtUsd(t.size * t.price)}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+  } catch (e) { el.innerHTML = `<div class="status">Failed to load: ${esc(e.message)}</div>`; }
+}
+
+function toggleWhaleAuto() {
+  const b = $('whale-auto');
+  if (whaleAutoTimer) { clearInterval(whaleAutoTimer); whaleAutoTimer = null; b.textContent = 'Auto-refresh: off'; b.classList.remove('on'); }
+  else { whaleAutoTimer = setInterval(() => { if (currentTab === 'whale') loadWhales(); }, 30000); b.textContent = 'Auto-refresh: 30s'; b.classList.add('on'); }
+}
+
+/* ============ TRADER DETAIL ============ */
+function backFromTrader() { showTab(prevTab); }
+
+async function openTrader(wallet, name) {
+  prevTab = currentTab;
+  for (const t of ALL_TABS) $('view-' + t).style.display = 'none';
+  $('view-trader').style.display = '';
+  const el = $('trader-body');
+  el.innerHTML = '<div class="status">Loading trader…</div>';
+  try {
+    const [positions, trades] = await Promise.all([
+      api('positions', { user: wallet, limit: 100, sortBy: 'CURRENT', sortDirection: 'DESC' }),
+      api('trades', { user: wallet, limit: 100, takerOnly: 'true' }),
+    ]);
+
+    const open = positions.filter(p => p.currentValue > 1);
+    const openValue = open.reduce((a, p) => a + p.currentValue, 0);
+    const unrealized = open.reduce((a, p) => a + p.cashPnl, 0);
+    const realized = positions.reduce((a, p) => a + (p.realizedPnl || 0), 0);
+    const settled = positions.filter(p => Math.abs(p.realizedPnl || 0) > 1);
+    const wins = settled.filter(p => p.realizedPnl > 0).length;
+
+    const buys = trades.filter(t => t.side === 'BUY');
+    const buyShare = trades.length ? Math.round(buys.length / trades.length * 100) : 0;
+    const avgSize = trades.length ? trades.reduce((a, t) => a + t.size * t.price, 0) / trades.length : 0;
+    const avgEntry = buys.length ? buys.reduce((a, t) => a + t.price, 0) / buys.length : 0;
+    const byMarket = {};
+    for (const t of trades) byMarket[t.title] = (byMarket[t.title] || 0) + t.size * t.price;
+    const topMarkets = Object.entries(byMarket).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    el.innerHTML = `
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+        <h1>${esc(name)}</h1>
+        ${watchBtnHtml(wallet, name)}
+      </div>
+      <div class="sub">${esc(wallet)} · <a href="https://polymarket.com/profile/${esc(wallet)}" target="_blank" rel="noopener">View on Polymarket ↗</a></div>
+      <div class="tiles">
+        <div class="tile"><div class="k">Open positions</div><div class="v">${open.length}</div></div>
+        <div class="tile"><div class="k">Open value</div><div class="v">${fmtUsd(openValue)}</div></div>
+        <div class="tile"><div class="k">Unrealized P&amp;L</div><div class="v ${cls(unrealized)}">${fmtUsd(unrealized)}</div></div>
+        <div class="tile"><div class="k">Realized P&amp;L (recent)</div><div class="v ${cls(realized)}">${fmtUsd(realized)}</div></div>
+        <div class="tile"><div class="k">Win rate (settled)</div><div class="v">${settled.length ? Math.round(wins / settled.length * 100) + '%' : '—'}</div><div class="muted">${wins}/${settled.length} positions</div></div>
+      </div>
+      <h2>Trading pattern (last ${trades.length} trades)</h2>
+      <div class="tiles">
+        <div class="tile"><div class="k">Buy vs sell</div><div class="v">${buyShare}% buys</div></div>
+        <div class="tile"><div class="k">Avg trade size</div><div class="v">${fmtUsd(avgSize)}</div></div>
+        <div class="tile"><div class="k">Avg entry price</div><div class="v">${buys.length ? fmtCents(avgEntry) : '—'}</div><div class="muted">low = longshots, high = favorites</div></div>
+      </div>
+      ${topMarkets.length ? `<table><thead><tr><th>Most-traded markets</th><th class="num">Volume</th></tr></thead><tbody>` +
+        topMarkets.map(([t, v]) => `<tr><td>${esc(t)}</td><td class="num">${fmtUsd(v)}</td></tr>`).join('') + '</tbody></table>' : ''}
+      <h2>Open positions</h2>
+      ${open.length ? `<table><thead><tr>
+          <th>Market</th><th>Outcome</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Value</th><th class="num">P&amp;L</th>
+        </tr></thead><tbody>` +
+        open.map(p => `<tr>
+          <td>${esc(p.title)}</td><td>${esc(p.outcome)}</td>
+          <td class="num">${fmtCents(p.avgPrice)}</td><td class="num">${fmtCents(p.curPrice)}</td>
+          <td class="num">${fmtUsd2(p.currentValue)}</td>
+          <td class="num ${cls(p.cashPnl)}">${fmtUsd(p.cashPnl)} <span class="muted">(${p.percentPnl > 0 ? '+' : ''}${p.percentPnl.toFixed(0)}%)</span></td>
+        </tr>`).join('') + '</tbody></table>' : '<div class="status">No open positions</div>'}
+      <h2>Recent trades</h2>
+      ${trades.length ? `<table><thead><tr>
+          <th>When</th><th>Side</th><th>Market</th><th>Outcome</th><th class="num">Price</th><th class="num">Amount</th>
+        </tr></thead><tbody>` +
+        trades.slice(0, 50).map(t => `<tr>
+          <td class="muted" style="white-space:nowrap">${ago(t.timestamp)}</td>
+          <td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${esc(t.side)}</span></td>
+          <td>${esc(t.title)}</td><td>${esc(t.outcome)}</td>
+          <td class="num">${fmtCents(t.price)}</td>
+          <td class="num">${fmtUsd(t.size * t.price)}</td>
+        </tr>`).join('') + '</tbody></table>' : '<div class="status">No recent trades</div>'}
+    `;
+  } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
+}
+
+/* ============ PAPER TRADING ENGINE ============ */
+const PAPER_KEY = 'pm_paper';
+const PAPER_STARTING_BALANCE = 10000;
+
+function getPaper() {
+  try {
+    const d = JSON.parse(localStorage.getItem(PAPER_KEY));
+    if (d && d.balance !== undefined) return d;
+  } catch {}
+  return { balance: PAPER_STARTING_BALANCE, open: [], closed: [], autoTrade: true, created: Date.now() };
+}
+function savePaper(p) { localStorage.setItem(PAPER_KEY, JSON.stringify(p)); }
+
+function resetPaper() {
+  if (!confirm('Reset paper account to $10,000? All simulated trades will be erased.')) return;
+  localStorage.removeItem(PAPER_KEY);
+  loadPaper();
+}
+
+function toggleAutoTrade() {
+  const p = getPaper();
+  p.autoTrade = !p.autoTrade;
+  savePaper(p);
+  loadPaper();
+}
+
+function positionSize(balance, strength) {
+  if (strength === 'high') return Math.min(balance * 0.10, 500);
+  if (strength === 'med') return Math.min(balance * 0.05, 250);
+  return Math.min(balance * 0.02, 100);
+}
+
+async function runAutoTrade() {
+  const paper = getPaper();
+  if (!paper.autoTrade || paper.balance < 10) return { placed: 0, paper };
+
+  try {
+    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
+    const profitable = lb.filter(u => u.pnl > 0);
+
+    const allPositions = await Promise.all(profitable.map(async u => {
+      try {
+        const pos = await api('positions', { user: u.proxyWallet, limit: 200, sortBy: 'CURRENT', sortDirection: 'DESC' });
+        return pos.filter(p => p.currentValue > 1).map(p => ({ ...p, traderWallet: u.proxyWallet }));
+      } catch { return []; }
+    }));
+
+    const consensus = {};
+    for (const positions of allPositions) {
+      for (const p of positions) {
+        const key = `${p.title}|||${p.outcome}`;
+        if (!consensus[key]) consensus[key] = { title: p.title, outcome: p.outcome, slug: p.slug, traders: new Set(), avgEntry: 0, curPrice: p.curPrice, entries: [] };
+        consensus[key].traders.add(p.traderWallet);
+        consensus[key].entries.push(p.avgPrice);
+        consensus[key].curPrice = p.curPrice;
+      }
+    }
+
+    let placed = 0;
+    for (const c of Object.values(consensus)) {
+      const count = c.traders.size;
+      if (count < 3) continue;
+      const avgEntry = c.entries.reduce((a, b) => a + b, 0) / c.entries.length;
+      const gap = avgEntry > 0 ? Math.abs(c.curPrice - avgEntry) / avgEntry : 1;
+      if (gap > 0.20) continue;
+
+      const tradeKey = `${c.title}|||${c.outcome}`;
+      if (paper.open.some(o => o.key === tradeKey)) continue;
+      if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
+
+      const strength = count >= 4 ? 'high' : 'med';
+      const size = positionSize(paper.balance, strength);
+      if (size < 5 || size > paper.balance) continue;
+
+      const shares = size / c.curPrice;
+      paper.open.push({
+        key: tradeKey, title: c.title, outcome: c.outcome, slug: c.slug,
+        entry: c.curPrice, shares, cost: size, strength,
+        traders: count, openedAt: Date.now()
+      });
+      paper.balance -= size;
+      placed++;
+      if (placed >= 5) break;
+    }
+
+    savePaper(paper);
+    return { placed, paper };
+  } catch (e) {
+    return { placed: 0, paper, error: e.message };
+  }
+}
+
+async function updateOpenPrices(paper) {
+  for (const pos of paper.open) {
+    try {
+      const key = pos.key.split('|||');
+      const title = key[0];
+      const outcome = key[1];
+      const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 5 });
+      if (lb.length) {
+        const positions = await api('positions', { user: lb[0].proxyWallet, limit: 200 });
+        const match = positions.find(p => p.title === title && p.outcome === outcome);
+        if (match) pos.currentPrice = match.curPrice;
+      }
+    } catch {}
+    if (!pos.currentPrice) pos.currentPrice = pos.entry;
+  }
+  return paper;
+}
+
+function closePaperPosition(idx) {
+  const paper = getPaper();
+  const pos = paper.open[idx];
+  if (!pos) return;
+  const value = pos.shares * (pos.currentPrice || pos.entry);
+  const pnl = value - pos.cost;
+  paper.balance += value;
+  paper.closed.push({ ...pos, closedAt: Date.now(), exitPrice: pos.currentPrice || pos.entry, pnl, value });
+  paper.open.splice(idx, 1);
+  savePaper(paper);
+  loadPaper();
+}
+
+function getWeeklyRetro(paper) {
+  const weekAgo = Date.now() - 7 * 86400000;
+  const weekTrades = paper.closed.filter(t => t.closedAt >= weekAgo);
+  if (!weekTrades.length) return null;
+
+  const totalPnl = weekTrades.reduce((a, t) => a + t.pnl, 0);
+  const wins = weekTrades.filter(t => t.pnl > 0);
+  const losses = weekTrades.filter(t => t.pnl <= 0);
+  const winRate = (wins.length / weekTrades.length * 100).toFixed(0);
+  const best = weekTrades.reduce((a, t) => t.pnl > a.pnl ? t : a, weekTrades[0]);
+  const worst = weekTrades.reduce((a, t) => t.pnl < a.pnl ? t : a, weekTrades[0]);
+
+  const byStrength = {};
+  for (const t of weekTrades) {
+    if (!byStrength[t.strength]) byStrength[t.strength] = { pnl: 0, count: 0, wins: 0 };
+    byStrength[t.strength].pnl += t.pnl;
+    byStrength[t.strength].count++;
+    if (t.pnl > 0) byStrength[t.strength].wins++;
+  }
+
+  return { totalPnl, wins: wins.length, losses: losses.length, winRate, best, worst, byStrength, total: weekTrades.length };
+}
+
+async function loadPaper() {
+  const el = $('paper-body');
+  el.innerHTML = '<div class="status">Loading paper trading portfolio…</div>';
+
+  let paper = getPaper();
+
+  if (paper.autoTrade && paper.open.length < 10) {
+    el.innerHTML = '<div class="status">Scanning signals and auto-trading…</div>';
+    const result = await runAutoTrade();
+    paper = result.paper;
+    if (result.placed > 0) {
+      el.innerHTML = `<div class="status">Placed ${result.placed} new simulated trade(s). Updating prices…</div>`;
+    }
+  }
+
+  paper = await updateOpenPrices(paper);
+  savePaper(paper);
+
+  const openValue = paper.open.reduce((a, p) => a + p.shares * (p.currentPrice || p.entry), 0);
+  const openPnl = paper.open.reduce((a, p) => a + (p.shares * (p.currentPrice || p.entry) - p.cost), 0);
+  const totalValue = paper.balance + openValue;
+  const totalReturn = totalValue - PAPER_STARTING_BALANCE;
+  const closedPnl = paper.closed.reduce((a, t) => a + t.pnl, 0);
+
+  let html = '';
+
+  // Toggle
+  html += `<div class="toggle-row">
+    <span class="toggle-label">Auto-trade on signals</span>
+    <div class="toggle ${paper.autoTrade ? 'on' : ''}" onclick="toggleAutoTrade()"></div>
+    <span class="muted">${paper.autoTrade ? 'Buying when consensus ≥ 3 traders & still copyable' : 'Manual mode — auto-trade disabled'}</span>
+  </div>`;
+
+  // Portfolio bar
+  html += '<div class="port-bar">';
+  html += `<div><span class="label">Portfolio</span><div class="big">${fmtUsd2(totalValue)}</div></div>`;
+  html += `<div><span class="label">Cash</span><div class="big">${fmtUsd2(paper.balance)}</div></div>`;
+  html += `<div><span class="label">Invested</span><div class="big">${fmtUsd2(openValue)}</div></div>`;
+  html += `<div><span class="label">Total return</span><div class="big ${cls(totalReturn)}">${fmtUsd2(totalReturn)} (${(totalReturn / PAPER_STARTING_BALANCE * 100).toFixed(1)}%)</div></div>`;
+  html += '</div>';
+
+  // Stats tiles
+  html += '<div class="tiles">';
+  html += `<div class="tile"><div class="k">Open positions</div><div class="v">${paper.open.length}</div></div>`;
+  html += `<div class="tile"><div class="k">Unrealized P&L</div><div class="v ${cls(openPnl)}">${fmtUsd2(openPnl)}</div></div>`;
+  html += `<div class="tile"><div class="k">Realized P&L</div><div class="v ${cls(closedPnl)}">${fmtUsd2(closedPnl)}</div></div>`;
+  html += `<div class="tile"><div class="k">Total trades</div><div class="v">${paper.open.length + paper.closed.length}</div></div>`;
+  html += '</div>';
+
+  // Open positions
+  html += '<div class="section-header"><h2>Open positions</h2><span class="section-count">' + paper.open.length + '</span></div>';
+  if (paper.open.length) {
+    html += `<table><thead><tr>
+      <th>Market</th><th>Outcome</th><th>Signal</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Cost</th><th class="num">Value</th><th class="num">P&L</th><th></th>
+    </tr></thead><tbody>`;
+    for (let i = 0; i < paper.open.length; i++) {
+      const p = paper.open[i];
+      const cur = p.currentPrice || p.entry;
+      const val = p.shares * cur;
+      const pnl = val - p.cost;
+      html += `<tr>
+        <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
+        <td>${esc(p.outcome)}</td>
+        <td><span class="signal-strength ${p.strength}">${p.traders} traders</span></td>
+        <td class="num">${fmtCents(p.entry)}</td>
+        <td class="num">${fmtCents(cur)}</td>
+        <td class="num">${fmtUsd2(p.cost)}</td>
+        <td class="num">${fmtUsd2(val)}</td>
+        <td class="num ${cls(pnl)}">${fmtUsd2(pnl)}</td>
+        <td><button class="watch-btn" onclick="closePaperPosition(${i})">Close</button></td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="status">No open positions. ' + (paper.autoTrade ? 'Auto-trader will place trades when strong signals appear.' : 'Turn on auto-trade or wait for signals.') + '</div>';
+  }
+
+  // Weekly retrospective
+  const retro = getWeeklyRetro(paper);
+  if (retro) {
+    html += '<div class="section-header"><h2>Weekly retrospective</h2></div>';
+    html += '<div class="retro-card">';
+    html += '<h3>Last 7 days performance</h3>';
+    html += '<div class="tiles">';
+    html += `<div class="tile"><div class="k">Total P&L</div><div class="v ${cls(retro.totalPnl)}">${fmtUsd2(retro.totalPnl)}</div></div>`;
+    html += `<div class="tile"><div class="k">Win rate</div><div class="v">${retro.winRate}%</div><div class="muted">${retro.wins}W / ${retro.losses}L</div></div>`;
+    html += `<div class="tile"><div class="k">Trades</div><div class="v">${retro.total}</div></div>`;
+    html += '</div>';
+
+    if (retro.best) {
+      html += `<div style="margin-top:8px"><span class="good" style="font-weight:600">Best:</span> ${esc(retro.best.title)} (${esc(retro.best.outcome)}) — ${fmtUsd2(retro.best.pnl)}</div>`;
+    }
+    if (retro.worst && retro.worst !== retro.best) {
+      html += `<div><span class="bad" style="font-weight:600">Worst:</span> ${esc(retro.worst.title)} (${esc(retro.worst.outcome)}) — ${fmtUsd2(retro.worst.pnl)}</div>`;
+    }
+
+    const strengths = Object.entries(retro.byStrength);
+    if (strengths.length) {
+      html += '<div style="margin-top:10px"><div class="muted" style="margin-bottom:4px">Performance by signal strength:</div>';
+      html += '<div class="tiles">';
+      for (const [s, d] of strengths) {
+        const wr = d.count > 0 ? Math.round(d.wins / d.count * 100) : 0;
+        html += `<div class="tile"><div class="k">${s} signals</div><div class="v ${cls(d.pnl)}">${fmtUsd2(d.pnl)}</div><div class="muted">${wr}% win · ${d.count} trades</div></div>`;
+      }
+      html += '</div></div>';
+    }
+    html += '</div>';
+  }
+
+  // Trade history
+  html += '<div class="section-header"><h2>Trade history</h2><span class="section-count">' + paper.closed.length + '</span></div>';
+  if (paper.closed.length) {
+    const sorted = [...paper.closed].sort((a, b) => b.closedAt - a.closedAt);
+    html += `<table><thead><tr>
+      <th>Closed</th><th>Market</th><th>Outcome</th><th>Signal</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Cost</th><th class="num">P&L</th>
+    </tr></thead><tbody>`;
+    for (const t of sorted.slice(0, 50)) {
+      html += `<tr>
+        <td class="muted" style="white-space:nowrap">${new Date(t.closedAt).toLocaleDateString()}</td>
+        <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(t.title)}</td>
+        <td>${esc(t.outcome)}</td>
+        <td><span class="signal-strength ${t.strength}">${t.traders} traders</span></td>
+        <td class="num">${fmtCents(t.entry)}</td>
+        <td class="num">${fmtCents(t.exitPrice)}</td>
+        <td class="num">${fmtUsd2(t.cost)}</td>
+        <td class="num ${cls(t.pnl)}">${fmtUsd2(t.pnl)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="status">No closed trades yet. Positions will appear here after you close them or markets settle.</div>';
+  }
+
+  html += `<div class="muted" style="margin-top:14px">Paper account started with ${fmtUsd(PAPER_STARTING_BALANCE)} · Created ${new Date(paper.created).toLocaleDateString()} · All trades are simulated — no real money.</div>`;
+
+  el.innerHTML = html;
+}
+
+// Auto-refresh watchlist every 60s
+watchlistTimer = setInterval(() => { if (currentTab === 'watchlist') loadWatchlist(); }, 60000);
+loadSignals();
+</script>
+</body>
+</html>
