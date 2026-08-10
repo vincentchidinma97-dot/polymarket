@@ -93,6 +93,19 @@
   .toggle.on { background: var(--good); }
   .toggle::after { content:''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: var(--ink); border-radius: 50%; transition: transform .2s; }
   .toggle.on::after { transform: translateX(18px); }
+  .news-item { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .news-item:last-child { border-bottom: none; }
+  .news-item .news-src { color: var(--accent); font-weight: 600; white-space: nowrap; min-width: 80px; }
+  .news-item .news-title { color: var(--ink); flex: 1; }
+  .news-item .news-title a { color: var(--ink); text-decoration: none; }
+  .news-item .news-title a:hover { color: var(--accent); }
+  .news-item .news-time { color: var(--ink3); white-space: nowrap; }
+  .sentiment-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .sentiment-dot.bullish { background: var(--good); }
+  .sentiment-dot.bearish { background: var(--bad); }
+  .sentiment-dot.neutral { background: var(--ink3); }
+  .news-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+  .news-card .news-market { font-weight: 600; font-size: 13px; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
 </style>
 </head>
 <body>
@@ -1266,6 +1279,76 @@ function getWeeklyRetro(paper) {
   };
 }
 
+/* ---- News feed + sentiment ---- */
+async function fetchNews(query) {
+  try {
+    const r = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
+    if (!r.ok) return [];
+    const data = await r.json();
+    return data.items || [];
+  } catch { return []; }
+}
+
+function extractSearchTerms(title) {
+  return title
+    .replace(/Will |win |on |\?|O\/U \d+\.\d+|Spread:|vs\.|:/gi, '')
+    .replace(/\d{4}-\d{2}-\d{2}/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ').filter(w => w.length > 2).slice(0, 4).join(' ');
+}
+
+const BULLISH_WORDS = /surge|rally|win|beat|lead|gain|rise|up|bullish|strong|positive|approve|pass|hike|increase|victory|ahead|favor/i;
+const BEARISH_WORDS = /fall|drop|lose|crash|down|bearish|weak|negative|reject|fail|cut|decrease|defeat|behind|slump|decline/i;
+
+function analyzeSentiment(headlines, outcome) {
+  if (!headlines.length) return 'neutral';
+  let score = 0;
+  for (const h of headlines) {
+    const t = h.title || '';
+    if (BULLISH_WORDS.test(t)) score++;
+    if (BEARISH_WORDS.test(t)) score--;
+  }
+  if (score >= 2) return 'bullish';
+  if (score <= -2) return 'bearish';
+  return 'neutral';
+}
+
+function newsAgo(pubDate) {
+  if (!pubDate) return '';
+  const s = Math.max(0, (Date.now() - new Date(pubDate).getTime()) / 1000);
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+
+async function fetchNewsForPositions(positions) {
+  const seen = new Set();
+  const queries = [];
+  for (const p of positions) {
+    const q = extractSearchTerms(p.title);
+    if (!q || seen.has(q)) continue;
+    seen.add(q);
+    queries.push({ key: p.key, query: q, title: p.title, outcome: p.outcome });
+  }
+
+  const results = {};
+  const batches = queries.slice(0, 8);
+  const fetched = await Promise.all(batches.map(async q => {
+    const items = await fetchNews(q.query);
+    return { ...q, items };
+  }));
+
+  for (const f of fetched) {
+    results[f.key] = {
+      items: f.items,
+      sentiment: analyzeSentiment(f.items, f.outcome),
+      query: f.query
+    };
+  }
+  return results;
+}
+
 async function loadPaper() {
   const el = $('paper-body');
   el.innerHTML = '<div class="status">Loading paper trading portfolio…</div>';
@@ -1293,6 +1376,13 @@ async function loadPaper() {
   // Step 3: Auto-close (TP/SL/trailing)
   const closeResult = runAutoClose(paper);
   savePaper(paper);
+
+  // Step 4: Fetch news for open positions (non-blocking)
+  let newsData = {};
+  if (paper.open.length) {
+    el.innerHTML = '<div class="status">Fetching live news for your positions…</div>';
+    newsData = await fetchNewsForPositions(paper.open);
+  }
 
   const openValue = paper.open.reduce((a, p) => a + p.shares * (p.currentPrice || p.entry), 0);
   const openPnl = paper.open.reduce((a, p) => a + (p.shares * (p.currentPrice || p.entry) - p.cost), 0);
@@ -1378,6 +1468,43 @@ async function loadPaper() {
   if (!paper.open.length) {
     html += '<div class="section-header"><h2>Open positions</h2><span class="section-count">0</span></div>';
     html += '<div class="status">No open positions. ' + (paper.autoTrade ? 'Auto-trader will place trades when strong signals appear.' : 'Turn on auto-trade or watchlist mirroring.') + '</div>';
+  }
+
+  // News & Context
+  const newsKeys = Object.keys(newsData);
+  if (newsKeys.length) {
+    const hasNews = newsKeys.filter(k => newsData[k].items.length > 0);
+    html += `<div class="section-header"><h2>News & Context</h2><span class="section-count">${hasNews.length} markets</span></div>`;
+    html += '<div class="muted" style="margin-bottom:8px">Live headlines matching your open positions — sentiment analysis based on keyword signals.</div>';
+
+    if (hasNews.length) {
+      for (const key of hasNews) {
+        const nd = newsData[key];
+        const pos = paper.open.find(p => p.key === key);
+        if (!pos || !nd.items.length) continue;
+
+        const sentColor = nd.sentiment === 'bullish' ? 'var(--good)' : nd.sentiment === 'bearish' ? 'var(--bad)' : 'var(--ink3)';
+        const sentLabel = nd.sentiment.charAt(0).toUpperCase() + nd.sentiment.slice(1);
+
+        html += '<div class="news-card">';
+        html += `<div class="news-market">
+          <span class="sentiment-dot ${nd.sentiment}"></span>
+          <span>${esc(pos.title)}</span>
+          <span style="color:${sentColor}; font-size:11px; font-weight:600; text-transform:uppercase">${sentLabel}</span>
+        </div>`;
+        for (const item of nd.items.slice(0, 4)) {
+          const t = newsAgo(item.pubDate);
+          html += `<div class="news-item">
+            <span class="news-src">${esc(item.source || 'News')}</span>
+            <span class="news-title"><a href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a></span>
+            ${t ? `<span class="news-time">${t} ago</span>` : ''}
+          </div>`;
+        }
+        html += '</div>';
+      }
+    } else {
+      html += '<div class="status">No matching news found for current positions.</div>';
+    }
   }
 
   // Weekly retrospective

@@ -17,6 +17,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/proxy":
             self.proxy(parsed.query)
+        elif parsed.path == "/api/news":
+            self.news(parsed.query)
         elif parsed.path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html; charset=utf-8")
         else:
@@ -43,6 +45,51 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+        except Exception as e:
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
+
+    def news(self, query):
+        params = urllib.parse.parse_qs(query)
+        q = params.get("q", [None])[0]
+        if not q:
+            self.send_response(400); self.end_headers(); return
+
+        encoded = urllib.parse.quote(q)
+        url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+
+        try:
+            body = subprocess.run(
+                ["curl", "-sf", "--max-time", "10", "-A", "polymarket-tracker/1.0", url],
+                capture_output=True, check=True,
+            ).stdout.decode()
+
+            import re
+            items = []
+            for m in re.finditer(r"<item>(.*?)</item>", body, re.DOTALL):
+                if len(items) >= 8:
+                    break
+                block = m.group(1)
+                title = (re.search(r"<title>(.*?)</title>", block, re.DOTALL) or type("", (), {"group": lambda s, n: ""})()).group(1)
+                link = (re.search(r"<link>(.*?)</link>", block, re.DOTALL) or type("", (), {"group": lambda s, n: ""})()).group(1)
+                pub = (re.search(r"<pubDate>(.*?)</pubDate>", block, re.DOTALL) or type("", (), {"group": lambda s, n: ""})()).group(1)
+                src = (re.search(r"<source[^>]*>(.*?)</source>", block, re.DOTALL) or type("", (), {"group": lambda s, n: ""})()).group(1)
+
+                for old, new in [("<![CDATA[", ""), ("]]>", ""), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")]:
+                    title = title.replace(old, new)
+                    src = src.replace(old, new)
+                    link = link.replace(old, new)
+
+                items.append({"title": title, "link": link, "pubDate": pub, "source": src, "ts": 0})
+
+            result = json.dumps({"query": q, "count": len(items), "items": items})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(result.encode())
         except Exception as e:
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
