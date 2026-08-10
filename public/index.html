@@ -824,16 +824,25 @@ async function openTrader(wallet, name) {
   } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
 }
 
-/* ============ PAPER TRADING ENGINE ============ */
+/* ============ PAPER TRADING ENGINE v2 ============ */
 const PAPER_KEY = 'pm_paper';
 const PAPER_STARTING_BALANCE = 10000;
+
+// Tiered conviction thresholds
+const TIER_ELITE = 10;   // 10+ traders = elite conviction — max size
+const TIER_STRONG = 6;   // 6-9 traders = strong — good size
+const TIER_WATCHLIST = 1; // watchlist mirroring — smaller exploratory size
 
 function getPaper() {
   try {
     const d = JSON.parse(localStorage.getItem(PAPER_KEY));
     if (d && d.balance !== undefined) return d;
   } catch {}
-  return { balance: PAPER_STARTING_BALANCE, open: [], closed: [], autoTrade: true, created: Date.now() };
+  return {
+    balance: PAPER_STARTING_BALANCE, open: [], closed: [],
+    autoTrade: true, mirrorWatchlist: true,
+    minConsensus: TIER_STRONG, created: Date.now()
+  };
 }
 function savePaper(p) { localStorage.setItem(PAPER_KEY, JSON.stringify(p)); }
 
@@ -850,17 +859,43 @@ function toggleAutoTrade() {
   loadPaper();
 }
 
-function positionSize(balance, strength) {
-  if (strength === 'high') return Math.min(balance * 0.10, 500);
-  if (strength === 'med') return Math.min(balance * 0.05, 250);
+function toggleMirrorWatchlist() {
+  const p = getPaper();
+  p.mirrorWatchlist = !p.mirrorWatchlist;
+  savePaper(p);
+  loadPaper();
+}
+
+function setMinConsensus(val) {
+  const p = getPaper();
+  p.minConsensus = parseInt(val);
+  savePaper(p);
+}
+
+function positionSize(balance, tier, traders) {
+  if (traders >= 20) return Math.min(balance * 0.15, 800);
+  if (traders >= TIER_ELITE) return Math.min(balance * 0.10, 600);
+  if (traders >= TIER_STRONG) return Math.min(balance * 0.06, 400);
+  if (tier === 'watchlist') return Math.min(balance * 0.03, 200);
   return Math.min(balance * 0.02, 100);
+}
+
+function tradeLabel(traders, source) {
+  if (source === 'watchlist') return 'watchlist';
+  if (traders >= 20) return 'elite';
+  if (traders >= TIER_ELITE) return 'high';
+  return 'strong';
 }
 
 async function runAutoTrade() {
   const paper = getPaper();
-  if (!paper.autoTrade || paper.balance < 10) return { placed: 0, paper };
+  if (!paper.autoTrade || paper.balance < 10) return { placed: 0, watchlistPlaced: 0, paper };
+
+  let placed = 0, watchlistPlaced = 0;
+  const minC = paper.minConsensus || TIER_STRONG;
 
   try {
+    // === CONSENSUS TRADES: scan top 50 traders ===
     const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
     const profitable = lb.filter(u => u.pnl > 0);
 
@@ -875,62 +910,143 @@ async function runAutoTrade() {
     for (const positions of allPositions) {
       for (const p of positions) {
         const key = `${p.title}|||${p.outcome}`;
-        if (!consensus[key]) consensus[key] = { title: p.title, outcome: p.outcome, slug: p.slug, traders: new Set(), avgEntry: 0, curPrice: p.curPrice, entries: [] };
+        if (!consensus[key]) consensus[key] = { title: p.title, outcome: p.outcome, slug: p.slug, traders: new Set(), curPrice: p.curPrice, entries: [] };
         consensus[key].traders.add(p.traderWallet);
         consensus[key].entries.push(p.avgPrice);
         consensus[key].curPrice = p.curPrice;
       }
     }
 
-    let placed = 0;
-    for (const c of Object.values(consensus)) {
+    // Sort by trader count descending — take the strongest signals first
+    const sorted = Object.values(consensus)
+      .filter(c => c.traders.size >= minC)
+      .sort((a, b) => b.traders.size - a.traders.size);
+
+    for (const c of sorted) {
       const count = c.traders.size;
-      if (count < 3) continue;
       const avgEntry = c.entries.reduce((a, b) => a + b, 0) / c.entries.length;
       const gap = avgEntry > 0 ? Math.abs(c.curPrice - avgEntry) / avgEntry : 1;
-      if (gap > 0.20) continue;
+      if (gap > 0.25) continue;
 
       const tradeKey = `${c.title}|||${c.outcome}`;
       if (paper.open.some(o => o.key === tradeKey)) continue;
       if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
 
-      const strength = count >= 4 ? 'high' : 'med';
-      const size = positionSize(paper.balance, strength);
+      const size = positionSize(paper.balance, 'consensus', count);
       if (size < 5 || size > paper.balance) continue;
 
       const shares = size / c.curPrice;
       paper.open.push({
         key: tradeKey, title: c.title, outcome: c.outcome, slug: c.slug,
-        entry: c.curPrice, shares, cost: size, strength,
-        traders: count, openedAt: Date.now()
+        entry: c.curPrice, shares, cost: size,
+        strength: tradeLabel(count, 'consensus'),
+        traders: count, source: 'consensus', openedAt: Date.now()
       });
       paper.balance -= size;
       placed++;
-      if (placed >= 5) break;
+      if (placed >= 3) break;
+    }
+
+    // === WATCHLIST MIRROR TRADES ===
+    if (paper.mirrorWatchlist) {
+      const wl = getWatchlist();
+      const wallets = Object.keys(wl);
+      if (wallets.length) {
+        const watchResults = await Promise.all(wallets.slice(0, 15).map(async wallet => {
+          try {
+            const [positions, trades] = await Promise.all([
+              api('positions', { user: wallet, limit: 100, sortBy: 'CURRENT', sortDirection: 'DESC' }),
+              api('trades', { user: wallet, limit: 20, takerOnly: 'true' }),
+            ]);
+            const open = positions.filter(p => p.currentValue > 1);
+            const recentBuys = trades.filter(t => t.side === 'BUY' && (Date.now() / 1000 - t.timestamp) < 7200);
+            return { wallet, name: wl[wallet].name, open, recentBuys };
+          } catch { return { wallet, name: wl[wallet].name, open: [], recentBuys: [] }; }
+        }));
+
+        // Mirror recent buys from watched traders
+        for (const wr of watchResults) {
+          for (const buy of wr.recentBuys) {
+            const tradeKey = `${buy.title}|||${buy.outcome}`;
+            if (paper.open.some(o => o.key === tradeKey)) continue;
+            if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
+
+            const size = positionSize(paper.balance, 'watchlist', 1);
+            if (size < 5 || size > paper.balance) continue;
+
+            const shares = size / buy.price;
+            paper.open.push({
+              key: tradeKey, title: buy.title, outcome: buy.outcome,
+              entry: buy.price, shares, cost: size,
+              strength: 'watchlist', traders: 1,
+              source: 'watchlist', sourceTrader: wr.name,
+              openedAt: Date.now()
+            });
+            paper.balance -= size;
+            watchlistPlaced++;
+            if (watchlistPlaced >= 3) break;
+          }
+          if (watchlistPlaced >= 3) break;
+        }
+
+        // Also mirror large open positions from watched insiders
+        for (const wr of watchResults) {
+          for (const pos of wr.open.filter(p => p.currentValue > 500)) {
+            const tradeKey = `${pos.title}|||${pos.outcome}`;
+            if (paper.open.some(o => o.key === tradeKey)) continue;
+            if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
+
+            const gap = pos.avgPrice > 0 ? Math.abs(pos.curPrice - pos.avgPrice) / pos.avgPrice : 1;
+            if (gap > 0.15) continue;
+
+            const size = positionSize(paper.balance, 'watchlist', 1);
+            if (size < 5 || size > paper.balance) continue;
+
+            const shares = size / pos.curPrice;
+            paper.open.push({
+              key: tradeKey, title: pos.title, outcome: pos.outcome,
+              entry: pos.curPrice, shares, cost: size,
+              strength: 'watchlist', traders: 1,
+              source: 'watchlist', sourceTrader: wr.name,
+              openedAt: Date.now()
+            });
+            paper.balance -= size;
+            watchlistPlaced++;
+            if (watchlistPlaced >= 5) break;
+          }
+          if (watchlistPlaced >= 5) break;
+        }
+      }
     }
 
     savePaper(paper);
-    return { placed, paper };
+    return { placed, watchlistPlaced, paper };
   } catch (e) {
-    return { placed: 0, paper, error: e.message };
+    savePaper(paper);
+    return { placed, watchlistPlaced, paper, error: e.message };
   }
 }
 
 async function updateOpenPrices(paper) {
-  for (const pos of paper.open) {
-    try {
-      const key = pos.key.split('|||');
-      const title = key[0];
-      const outcome = key[1];
-      const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 5 });
-      if (lb.length) {
-        const positions = await api('positions', { user: lb[0].proxyWallet, limit: 200 });
-        const match = positions.find(p => p.title === title && p.outcome === outcome);
-        if (match) pos.currentPrice = match.curPrice;
-      }
-    } catch {}
-    if (!pos.currentPrice) pos.currentPrice = pos.entry;
-  }
+  const titlesToFind = paper.open.map(p => ({ title: p.key.split('|||')[0], outcome: p.key.split('|||')[1] }));
+  if (!titlesToFind.length) return paper;
+
+  try {
+    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 10 });
+    const allPos = [];
+    for (const u of lb.slice(0, 3)) {
+      try {
+        const pos = await api('positions', { user: u.proxyWallet, limit: 200 });
+        allPos.push(...pos);
+      } catch {}
+    }
+    for (const op of paper.open) {
+      const [title, outcome] = op.key.split('|||');
+      const match = allPos.find(p => p.title === title && p.outcome === outcome);
+      if (match) op.currentPrice = match.curPrice;
+      else if (!op.currentPrice) op.currentPrice = op.entry;
+    }
+  } catch {}
   return paper;
 }
 
@@ -961,13 +1077,23 @@ function getWeeklyRetro(paper) {
 
   const byStrength = {};
   for (const t of weekTrades) {
-    if (!byStrength[t.strength]) byStrength[t.strength] = { pnl: 0, count: 0, wins: 0 };
-    byStrength[t.strength].pnl += t.pnl;
-    byStrength[t.strength].count++;
-    if (t.pnl > 0) byStrength[t.strength].wins++;
+    const lbl = t.strength || 'unknown';
+    if (!byStrength[lbl]) byStrength[lbl] = { pnl: 0, count: 0, wins: 0 };
+    byStrength[lbl].pnl += t.pnl;
+    byStrength[lbl].count++;
+    if (t.pnl > 0) byStrength[lbl].wins++;
   }
 
-  return { totalPnl, wins: wins.length, losses: losses.length, winRate, best, worst, byStrength, total: weekTrades.length };
+  const bySource = {};
+  for (const t of weekTrades) {
+    const src = t.source || 'consensus';
+    if (!bySource[src]) bySource[src] = { pnl: 0, count: 0, wins: 0 };
+    bySource[src].pnl += t.pnl;
+    bySource[src].count++;
+    if (t.pnl > 0) bySource[src].wins++;
+  }
+
+  return { totalPnl, wins: wins.length, losses: losses.length, winRate, best, worst, byStrength, bySource, total: weekTrades.length };
 }
 
 async function loadPaper() {
@@ -975,13 +1101,14 @@ async function loadPaper() {
   el.innerHTML = '<div class="status">Loading paper trading portfolio…</div>';
 
   let paper = getPaper();
+  const wlCount = Object.keys(getWatchlist()).length;
 
-  if (paper.autoTrade && paper.open.length < 10) {
-    el.innerHTML = '<div class="status">Scanning signals and auto-trading…</div>';
+  if (paper.autoTrade && paper.open.length < 15) {
+    el.innerHTML = '<div class="status">Scanning consensus signals + watchlist activity…</div>';
     const result = await runAutoTrade();
     paper = result.paper;
-    if (result.placed > 0) {
-      el.innerHTML = `<div class="status">Placed ${result.placed} new simulated trade(s). Updating prices…</div>`;
+    if (result.placed > 0 || result.watchlistPlaced > 0) {
+      el.innerHTML = `<div class="status">Placed ${result.placed} consensus + ${result.watchlistPlaced} watchlist trade(s). Updating prices…</div>`;
     }
   }
 
@@ -993,15 +1120,35 @@ async function loadPaper() {
   const totalValue = paper.balance + openValue;
   const totalReturn = totalValue - PAPER_STARTING_BALANCE;
   const closedPnl = paper.closed.reduce((a, t) => a + t.pnl, 0);
+  const consensusTrades = paper.open.filter(p => p.source === 'consensus');
+  const watchlistTrades = paper.open.filter(p => p.source === 'watchlist');
 
   let html = '';
 
-  // Toggle
+  // Strategy controls
+  html += '<div class="retro-card" style="margin-bottom:14px">';
+  html += '<h3>Strategy controls</h3>';
   html += `<div class="toggle-row">
-    <span class="toggle-label">Auto-trade on signals</span>
+    <span class="toggle-label">Consensus auto-trade</span>
     <div class="toggle ${paper.autoTrade ? 'on' : ''}" onclick="toggleAutoTrade()"></div>
-    <span class="muted">${paper.autoTrade ? 'Buying when consensus ≥ 3 traders & still copyable' : 'Manual mode — auto-trade disabled'}</span>
+    <span class="muted">${paper.autoTrade ? 'Active' : 'Off'}</span>
   </div>`;
+  html += `<div class="toggle-row">
+    <span class="toggle-label">Mirror watchlist trades</span>
+    <div class="toggle ${paper.mirrorWatchlist ? 'on' : ''}" onclick="toggleMirrorWatchlist()"></div>
+    <span class="muted">${paper.mirrorWatchlist ? `Mirroring ${wlCount} watched insider(s)` : 'Off'}</span>
+  </div>`;
+  html += `<div class="toggle-row">
+    <span class="toggle-label">Min consensus threshold</span>
+    <select onchange="setMinConsensus(this.value)" style="background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
+      <option value="6" ${(paper.minConsensus||6)===6?'selected':''}>6+ traders (strong)</option>
+      <option value="10" ${(paper.minConsensus||6)===10?'selected':''}>10+ traders (high conviction)</option>
+      <option value="15" ${(paper.minConsensus||6)===15?'selected':''}>15+ traders (very high)</option>
+      <option value="20" ${(paper.minConsensus||6)===20?'selected':''}>20+ traders (elite only)</option>
+    </select>
+    <span class="muted">Higher = fewer trades, stronger signals</span>
+  </div>`;
+  html += '</div>';
 
   // Portfolio bar
   html += '<div class="port-bar">';
@@ -1013,38 +1160,28 @@ async function loadPaper() {
 
   // Stats tiles
   html += '<div class="tiles">';
-  html += `<div class="tile"><div class="k">Open positions</div><div class="v">${paper.open.length}</div></div>`;
+  html += `<div class="tile"><div class="k">Open positions</div><div class="v">${paper.open.length}</div><div class="muted">${consensusTrades.length} consensus · ${watchlistTrades.length} watchlist</div></div>`;
   html += `<div class="tile"><div class="k">Unrealized P&L</div><div class="v ${cls(openPnl)}">${fmtUsd2(openPnl)}</div></div>`;
   html += `<div class="tile"><div class="k">Realized P&L</div><div class="v ${cls(closedPnl)}">${fmtUsd2(closedPnl)}</div></div>`;
   html += `<div class="tile"><div class="k">Total trades</div><div class="v">${paper.open.length + paper.closed.length}</div></div>`;
   html += '</div>';
 
-  // Open positions
-  html += '<div class="section-header"><h2>Open positions</h2><span class="section-count">' + paper.open.length + '</span></div>';
-  if (paper.open.length) {
-    html += `<table><thead><tr>
-      <th>Market</th><th>Outcome</th><th>Signal</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Cost</th><th class="num">Value</th><th class="num">P&L</th><th></th>
-    </tr></thead><tbody>`;
-    for (let i = 0; i < paper.open.length; i++) {
-      const p = paper.open[i];
-      const cur = p.currentPrice || p.entry;
-      const val = p.shares * cur;
-      const pnl = val - p.cost;
-      html += `<tr>
-        <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
-        <td>${esc(p.outcome)}</td>
-        <td><span class="signal-strength ${p.strength}">${p.traders} traders</span></td>
-        <td class="num">${fmtCents(p.entry)}</td>
-        <td class="num">${fmtCents(cur)}</td>
-        <td class="num">${fmtUsd2(p.cost)}</td>
-        <td class="num">${fmtUsd2(val)}</td>
-        <td class="num ${cls(pnl)}">${fmtUsd2(pnl)}</td>
-        <td><button class="watch-btn" onclick="closePaperPosition(${i})">Close</button></td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-  } else {
-    html += '<div class="status">No open positions. ' + (paper.autoTrade ? 'Auto-trader will place trades when strong signals appear.' : 'Turn on auto-trade or wait for signals.') + '</div>';
+  // Open positions — split by source
+  if (consensusTrades.length) {
+    html += `<div class="section-header"><h2>Consensus positions</h2><span class="section-count">${consensusTrades.length}</span></div>`;
+    html += '<div class="muted" style="margin-bottom:6px">Auto-traded because multiple top traders hold the same play.</div>';
+    html += renderPositionTable(paper.open, 'consensus');
+  }
+
+  if (watchlistTrades.length) {
+    html += `<div class="section-header"><h2>Watchlist mirror positions</h2><span class="section-count">${watchlistTrades.length}</span></div>`;
+    html += '<div class="muted" style="margin-bottom:6px">Copied from your watched insiders\' recent activity.</div>';
+    html += renderPositionTable(paper.open, 'watchlist');
+  }
+
+  if (!paper.open.length) {
+    html += '<div class="section-header"><h2>Open positions</h2><span class="section-count">0</span></div>';
+    html += '<div class="status">No open positions. ' + (paper.autoTrade ? 'Auto-trader will place trades when strong signals appear.' : 'Turn on auto-trade or watchlist mirroring.') + '</div>';
   }
 
   // Weekly retrospective
@@ -1066,13 +1203,26 @@ async function loadPaper() {
       html += `<div><span class="bad" style="font-weight:600">Worst:</span> ${esc(retro.worst.title)} (${esc(retro.worst.outcome)}) — ${fmtUsd2(retro.worst.pnl)}</div>`;
     }
 
+    // By source
+    const sources = Object.entries(retro.bySource);
+    if (sources.length) {
+      html += '<div style="margin-top:10px"><div class="muted" style="margin-bottom:4px">Consensus vs watchlist:</div>';
+      html += '<div class="tiles">';
+      for (const [s, d] of sources) {
+        const wr = d.count > 0 ? Math.round(d.wins / d.count * 100) : 0;
+        html += `<div class="tile"><div class="k">${s}</div><div class="v ${cls(d.pnl)}">${fmtUsd2(d.pnl)}</div><div class="muted">${wr}% win · ${d.count} trades</div></div>`;
+      }
+      html += '</div></div>';
+    }
+
+    // By strength
     const strengths = Object.entries(retro.byStrength);
     if (strengths.length) {
-      html += '<div style="margin-top:10px"><div class="muted" style="margin-bottom:4px">Performance by signal strength:</div>';
+      html += '<div style="margin-top:10px"><div class="muted" style="margin-bottom:4px">By conviction tier:</div>';
       html += '<div class="tiles">';
       for (const [s, d] of strengths) {
         const wr = d.count > 0 ? Math.round(d.wins / d.count * 100) : 0;
-        html += `<div class="tile"><div class="k">${s} signals</div><div class="v ${cls(d.pnl)}">${fmtUsd2(d.pnl)}</div><div class="muted">${wr}% win · ${d.count} trades</div></div>`;
+        html += `<div class="tile"><div class="k">${s}</div><div class="v ${cls(d.pnl)}">${fmtUsd2(d.pnl)}</div><div class="muted">${wr}% win · ${d.count} trades</div></div>`;
       }
       html += '</div></div>';
     }
@@ -1084,17 +1234,18 @@ async function loadPaper() {
   if (paper.closed.length) {
     const sorted = [...paper.closed].sort((a, b) => b.closedAt - a.closedAt);
     html += `<table><thead><tr>
-      <th>Closed</th><th>Market</th><th>Outcome</th><th>Signal</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">Cost</th><th class="num">P&L</th>
+      <th>Closed</th><th>Market</th><th>Outcome</th><th>Source</th><th>Signal</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">P&L</th>
     </tr></thead><tbody>`;
     for (const t of sorted.slice(0, 50)) {
+      const srcLabel = t.source === 'watchlist' ? `<span class="badge watching">${esc(t.sourceTrader || 'Watchlist')}</span>` : '<span class="badge new">Consensus</span>';
       html += `<tr>
         <td class="muted" style="white-space:nowrap">${new Date(t.closedAt).toLocaleDateString()}</td>
-        <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(t.title)}</td>
+        <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(t.title)}</td>
         <td>${esc(t.outcome)}</td>
-        <td><span class="signal-strength ${t.strength}">${t.traders} traders</span></td>
+        <td>${srcLabel}</td>
+        <td><span class="signal-strength ${t.strength}">${t.traders}${t.source === 'consensus' ? ' traders' : ''}</span></td>
         <td class="num">${fmtCents(t.entry)}</td>
         <td class="num">${fmtCents(t.exitPrice)}</td>
-        <td class="num">${fmtUsd2(t.cost)}</td>
         <td class="num ${cls(t.pnl)}">${fmtUsd2(t.pnl)}</td>
       </tr>`;
     }
@@ -1106,6 +1257,37 @@ async function loadPaper() {
   html += `<div class="muted" style="margin-top:14px">Paper account started with ${fmtUsd(PAPER_STARTING_BALANCE)} · Created ${new Date(paper.created).toLocaleDateString()} · All trades are simulated — no real money.</div>`;
 
   el.innerHTML = html;
+}
+
+function renderPositionTable(allPositions, sourceFilter) {
+  const positions = allPositions.filter(p => p.source === sourceFilter);
+  let html = `<table><thead><tr>
+    <th>Market</th><th>Outcome</th>`;
+  if (sourceFilter === 'consensus') html += '<th>Signal</th>';
+  if (sourceFilter === 'watchlist') html += '<th>From</th>';
+  html += `<th class="num">Entry</th><th class="num">Now</th><th class="num">Cost</th><th class="num">Value</th><th class="num">P&L</th><th></th>
+  </tr></thead><tbody>`;
+  for (let i = 0; i < allPositions.length; i++) {
+    const p = allPositions[i];
+    if (p.source !== sourceFilter) continue;
+    const cur = p.currentPrice || p.entry;
+    const val = p.shares * cur;
+    const pnl = val - p.cost;
+    html += `<tr>
+      <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(p.title)}</td>
+      <td>${esc(p.outcome)}</td>`;
+    if (sourceFilter === 'consensus') html += `<td><span class="signal-strength ${p.strength}">${p.traders} traders</span></td>`;
+    if (sourceFilter === 'watchlist') html += `<td><span class="muted">${esc(p.sourceTrader || '?')}</span></td>`;
+    html += `<td class="num">${fmtCents(p.entry)}</td>
+      <td class="num">${fmtCents(cur)}</td>
+      <td class="num">${fmtUsd2(p.cost)}</td>
+      <td class="num">${fmtUsd2(val)}</td>
+      <td class="num ${cls(pnl)}">${fmtUsd2(pnl)}</td>
+      <td><button class="watch-btn" onclick="closePaperPosition(${i})">Close</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  return html;
 }
 
 // Auto-refresh watchlist every 60s
