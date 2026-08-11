@@ -188,6 +188,7 @@
       <span class="live-dot"></span>
       <label>Simulated portfolio — auto-trades based on signal strength</label>
       <button onclick="loadPaper()">Refresh</button>
+      <button onclick="triggerTradeRun()">Run engine</button>
       <button onclick="resetPaper()">Reset account</button>
     </div>
     <div id="paper-body" class="scroll"><div class="status">Loading…</div></div>
@@ -228,19 +229,16 @@ async function api(endpoint, params) {
   return r.json();
 }
 
-/* ============ WATCHLIST (localStorage) ============ */
+/* ============ WATCHLIST (server-backed) ============ */
 function getWatchlist() {
-  try { return JSON.parse(localStorage.getItem('pm_watchlist') || '{}'); } catch { return {}; }
+  return getWatchlistFromCache();
 }
-function saveWatchlist(wl) { localStorage.setItem('pm_watchlist', JSON.stringify(wl)); }
+function saveWatchlist(wl) { stateAPI('watchlist', wl); }
 function isWatching(wallet) { return !!getWatchlist()[wallet]; }
 
 function toggleWatch(wallet, name, e) {
   if (e) e.stopPropagation();
-  const wl = getWatchlist();
-  if (wl[wallet]) { delete wl[wallet]; }
-  else { wl[wallet] = { name, addedAt: Date.now(), lastPositionCount: null }; }
-  saveWatchlist(wl);
+  stateAPI('watchlist_toggle', { wallet, name });
   if (currentTab === 'watchlist') loadWatchlist();
   // Update all watch buttons on page
   document.querySelectorAll(`[data-wallet="${wallet}"]`).forEach(btn => {
@@ -487,6 +485,7 @@ async function loadSignals() {
 /* ============ WATCHLIST VIEW ============ */
 async function loadWatchlist() {
   const el = $('watchlist-body');
+  try { await getServerState(true); } catch {}
   const wl = getWatchlist();
   const wallets = Object.keys(wl);
 
@@ -837,391 +836,109 @@ async function openTrader(wallet, name) {
   } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
 }
 
-/* ============ PAPER TRADING ENGINE v3 ============ */
-const PAPER_KEY = 'pm_paper';
+/* ============ PAPER TRADING ENGINE v3 — SERVER-SIDE ============ */
 const PAPER_STARTING_BALANCE = 10000;
-
-// Risk management constants
 const TAKE_PROFIT_PCT = 0.25;
 const STOP_LOSS_PCT = -0.20;
 const TRAILING_STOP_TRIGGER = 0.15;
 const MAX_POSITIONS = 20;
 const MAX_EXPOSURE_PCT = 0.60;
-const CONSENSUS_EXIT_THRESHOLD = 3;
-
-// Tiered conviction thresholds
-const TIER_ELITE = 10;
-const TIER_STRONG = 6;
-const TIER_WATCHLIST = 1;
 
 let paperAutoTimer = null;
-let lastConsensusSnapshot = {};
+let _stateCache = null;
 
-function getPaper() {
-  try {
-    const d = JSON.parse(localStorage.getItem(PAPER_KEY));
-    if (d && d.balance !== undefined) return d;
-  } catch {}
-  return {
-    balance: PAPER_STARTING_BALANCE, open: [], closed: [],
-    autoTrade: true, mirrorWatchlist: true, autoClose: true,
-    minConsensus: TIER_STRONG, created: Date.now()
-  };
+async function getServerState(force) {
+  if (_stateCache && !force) return _stateCache;
+  const r = await fetch('/api/state');
+  if (!r.ok) throw new Error('Failed to load state from server');
+  _stateCache = await r.json();
+  return _stateCache;
 }
-function savePaper(p) { localStorage.setItem(PAPER_KEY, JSON.stringify(p)); }
 
-function resetPaper() {
+async function getPaper() {
+  const state = await getServerState();
+  return state.portfolio;
+}
+
+function getWatchlistFromCache() {
+  return (_stateCache && _stateCache.watchlist) || {};
+}
+
+async function stateAPI(type, data) {
+  const r = await fetch('/api/state', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, data }),
+  });
+  _stateCache = null;
+  return r.json();
+}
+
+async function resetPaper() {
   if (!confirm('Reset paper account to $10,000? All simulated trades will be erased.')) return;
-  localStorage.removeItem(PAPER_KEY);
-  lastConsensusSnapshot = {};
+  await stateAPI('reset', {});
+  localStorage.removeItem('pm_paper');
   loadPaper();
 }
 
-function toggleAutoTrade() { const p = getPaper(); p.autoTrade = !p.autoTrade; savePaper(p); loadPaper(); }
-function toggleMirrorWatchlist() { const p = getPaper(); p.mirrorWatchlist = !p.mirrorWatchlist; savePaper(p); loadPaper(); }
-function toggleAutoClose() { const p = getPaper(); p.autoClose = !p.autoClose; savePaper(p); loadPaper(); }
-function setMinConsensus(val) { const p = getPaper(); p.minConsensus = parseInt(val); savePaper(p); }
+async function toggleAutoTrade() { const p = await getPaper(); await stateAPI('settings', { autoTrade: !p.autoTrade }); loadPaper(); }
+async function toggleMirrorWatchlist() { const p = await getPaper(); await stateAPI('settings', { mirrorWatchlist: !p.mirrorWatchlist }); loadPaper(); }
+async function toggleAutoClose() { const p = await getPaper(); await stateAPI('settings', { autoClose: !p.autoClose }); loadPaper(); }
+async function setMinConsensus(val) { await stateAPI('settings', { minConsensus: parseInt(val) }); }
 
-function positionSize(balance, tier, traders) {
-  const maxInvest = PAPER_STARTING_BALANCE * MAX_EXPOSURE_PCT;
-  const invested = getPaper().open.reduce((a, p) => a + p.cost, 0);
-  const room = maxInvest - invested;
-  if (room < 10) return 0;
-
-  let size;
-  if (traders >= 20) size = Math.min(balance * 0.15, 800);
-  else if (traders >= TIER_ELITE) size = Math.min(balance * 0.10, 600);
-  else if (traders >= TIER_STRONG) size = Math.min(balance * 0.06, 400);
-  else if (tier === 'watchlist') size = Math.min(balance * 0.03, 200);
-  else size = Math.min(balance * 0.02, 100);
-
-  return Math.min(size, room);
+async function closePaperPosition(idx) {
+  await stateAPI('close_position', { index: idx });
+  loadPaper();
 }
 
-function tradeLabel(traders, source) {
-  if (source === 'watchlist') return 'watchlist';
-  if (traders >= 20) return 'elite';
-  if (traders >= TIER_ELITE) return 'high';
-  return 'strong';
-}
-
-/* ---- Auto-close: TP, SL, trailing stop ---- */
-function runAutoClose(paper) {
-  if (!paper.autoClose) return { closed: 0, reasons: {} };
-  const toClose = [];
-  for (let i = paper.open.length - 1; i >= 0; i--) {
-    const pos = paper.open[i];
-    const cur = pos.currentPrice || pos.entry;
-    const val = pos.shares * cur;
-    const pnlPct = (val - pos.cost) / pos.cost;
-
-    // Update high water mark
-    if (!pos.highWaterMark || cur > pos.highWaterMark) pos.highWaterMark = cur;
-
-    let reason = null;
-
-    if (pnlPct >= TAKE_PROFIT_PCT) {
-      reason = 'take-profit';
-    } else if (pnlPct <= STOP_LOSS_PCT) {
-      reason = 'stop-loss';
-    } else if (pos.highWaterMark > pos.entry) {
-      const peakPnlPct = (pos.shares * pos.highWaterMark - pos.cost) / pos.cost;
-      if (peakPnlPct >= TRAILING_STOP_TRIGGER && cur <= pos.entry) {
-        reason = 'trailing-stop';
-      }
+async function triggerTradeRun() {
+  const el = $('paper-body');
+  el.innerHTML = '<div class="status">Running trading engine…</div>';
+  try {
+    const r = await fetch('/api/cron/trade?source=dashboard');
+    const result = await r.json();
+    if (result.skipped) {
+      el.innerHTML = `<div class="status">Engine ran recently — next run in ${result.nextRunIn}s. Loading state…</div>`;
     }
-
-    if (reason) toClose.push({ idx: i, reason });
-  }
-
-  const reasons = {};
-  for (const { idx, reason } of toClose) {
-    const pos = paper.open[idx];
-    const cur = pos.currentPrice || pos.entry;
-    const val = pos.shares * cur;
-    const pnl = val - pos.cost;
-    paper.balance += val;
-    paper.closed.push({
-      ...pos, closedAt: Date.now(), exitPrice: cur, pnl, value: val, closeReason: reason
-    });
-    paper.open.splice(idx, 1);
-    reasons[reason] = (reasons[reason] || 0) + 1;
-  }
-
-  return { closed: toClose.length, reasons };
+  } catch {}
+  _stateCache = null;
+  await loadPaper();
 }
 
-/* ---- Scout insiders: auto-populate watchlist ---- */
 async function scoutInsiders() {
   const btn = document.getElementById('scout-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Scouting…'; }
-
   try {
-    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
-    const profitable = lb.filter(u => u.pnl > 0);
-
-    const enriched = await Promise.all(profitable.map(async u => {
-      try {
-        const pos = await api('positions', { user: u.proxyWallet, limit: 200 });
-        return { ...u, totalPositions: pos.length };
-      } catch { return { ...u, totalPositions: null }; }
-    }));
-
-    const candidates = enriched.filter(u =>
-      u.totalPositions !== null && u.totalPositions < 100 &&
-      u.vol > 0 && (u.pnl / u.vol) > 0.15
-    ).sort((a, b) => (b.pnl / b.vol) - (a.pnl / a.vol));
-
-    const wl = getWatchlist();
-    let added = 0;
-    for (const u of candidates) {
-      if (added >= 10) break;
-      if (wl[u.proxyWallet]) continue;
-      const name = displayName(u);
-      wl[u.proxyWallet] = { name, addedAt: Date.now(), lastPositionCount: null, scoutedBy: 'auto' };
-      added++;
-    }
-    saveWatchlist(wl);
-
-    if (btn) {
-      btn.textContent = added > 0 ? `Added ${added} insider(s)` : 'No new insiders found';
-      btn.disabled = false;
-      setTimeout(() => { btn.textContent = 'Scout insiders'; }, 3000);
-    }
-
-    if (added > 0 && currentTab === 'paper') loadPaper();
+    const r = await fetch('/api/cron/trade?source=dashboard');
+    await r.json();
+    if (btn) { btn.textContent = 'Scouted!'; btn.disabled = false; setTimeout(() => { btn.textContent = 'Scout insiders'; }, 3000); }
+    _stateCache = null;
+    loadPaper();
   } catch (e) {
     if (btn) { btn.textContent = 'Scout failed'; btn.disabled = false; }
   }
 }
 
-/* ---- Consensus exit detection ---- */
-function detectConsensusExits(paper, currentConsensus) {
-  const exits = [];
-  for (const pos of paper.open) {
-    if (pos.source !== 'consensus') continue;
-    const prev = lastConsensusSnapshot[pos.key];
-    const now = currentConsensus[pos.key];
-    if (prev && prev >= CONSENSUS_EXIT_THRESHOLD) {
-      const dropped = prev - (now || 0);
-      if (dropped >= CONSENSUS_EXIT_THRESHOLD) {
-        exits.push(pos);
-      }
-    }
-  }
-  return exits;
-}
-
-async function runAutoTrade() {
-  const paper = getPaper();
-  if (!paper.autoTrade || paper.balance < 10) return { placed: 0, watchlistPlaced: 0, consensusExits: 0, paper };
-
-  let placed = 0, watchlistPlaced = 0, consensusExits = 0;
-  const minC = paper.minConsensus || TIER_STRONG;
-
+async function migrateToServer() {
+  const paper = JSON.parse(localStorage.getItem('pm_paper') || 'null');
+  const watchlist = JSON.parse(localStorage.getItem('pm_watchlist') || 'null');
+  if (!paper && !watchlist) return;
   try {
-    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 50 });
-    const profitable = lb.filter(u => u.pnl > 0);
-
-    const allPositions = await Promise.all(profitable.map(async u => {
-      try {
-        const pos = await api('positions', { user: u.proxyWallet, limit: 200, sortBy: 'CURRENT', sortDirection: 'DESC' });
-        return pos.filter(p => p.currentValue > 1).map(p => ({ ...p, traderWallet: u.proxyWallet }));
-      } catch { return []; }
-    }));
-
-    const consensus = {};
-    for (const positions of allPositions) {
-      for (const p of positions) {
-        const key = `${p.title}|||${p.outcome}`;
-        if (!consensus[key]) consensus[key] = { title: p.title, outcome: p.outcome, slug: p.slug, traders: new Set(), curPrice: p.curPrice, entries: [] };
-        consensus[key].traders.add(p.traderWallet);
-        consensus[key].entries.push(p.avgPrice);
-        consensus[key].curPrice = p.curPrice;
+    const r = await stateAPI('migrate', { portfolio: paper, watchlist: watchlist });
+    if (r.migrated) {
+      localStorage.setItem('pm_migrated', 'true');
+      loadPaper();
+    } else if (r.hasData) {
+      if (confirm('Server already has data. Overwrite with local data?')) {
+        await stateAPI('reset', {});
+        await stateAPI('migrate', { portfolio: paper, watchlist: watchlist });
+        localStorage.setItem('pm_migrated', 'true');
+        loadPaper();
       }
     }
-
-    // Build consensus count map for exit detection
-    const consensusCounts = {};
-    for (const [key, c] of Object.entries(consensus)) consensusCounts[key] = c.traders.size;
-
-    // Consensus exit detection
-    const exiting = detectConsensusExits(paper, consensusCounts);
-    for (const pos of exiting) {
-      const idx = paper.open.indexOf(pos);
-      if (idx === -1) continue;
-      const cur = pos.currentPrice || pos.entry;
-      const val = pos.shares * cur;
-      const pnl = val - pos.cost;
-      paper.balance += val;
-      paper.closed.push({ ...pos, closedAt: Date.now(), exitPrice: cur, pnl, value: val, closeReason: 'consensus-exit' });
-      paper.open.splice(idx, 1);
-      consensusExits++;
-    }
-
-    lastConsensusSnapshot = consensusCounts;
-
-    // Open new consensus trades
-    if (paper.open.length < MAX_POSITIONS) {
-      const sorted = Object.values(consensus)
-        .filter(c => c.traders.size >= minC)
-        .sort((a, b) => b.traders.size - a.traders.size);
-
-      for (const c of sorted) {
-        if (paper.open.length >= MAX_POSITIONS) break;
-        const count = c.traders.size;
-        const avgEntry = c.entries.reduce((a, b) => a + b, 0) / c.entries.length;
-        const gap = avgEntry > 0 ? Math.abs(c.curPrice - avgEntry) / avgEntry : 1;
-        if (gap > 0.25) continue;
-
-        const tradeKey = `${c.title}|||${c.outcome}`;
-        if (paper.open.some(o => o.key === tradeKey)) continue;
-        if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
-
-        const size = positionSize(paper.balance, 'consensus', count);
-        if (size < 5 || size > paper.balance) continue;
-
-        const shares = size / c.curPrice;
-        paper.open.push({
-          key: tradeKey, title: c.title, outcome: c.outcome, slug: c.slug,
-          entry: c.curPrice, shares, cost: size,
-          strength: tradeLabel(count, 'consensus'),
-          traders: count, source: 'consensus', openedAt: Date.now(), highWaterMark: c.curPrice
-        });
-        paper.balance -= size;
-        placed++;
-        if (placed >= 3) break;
-      }
-    }
-
-    // Watchlist mirror trades
-    if (paper.mirrorWatchlist && paper.open.length < MAX_POSITIONS) {
-      const wl = getWatchlist();
-      const wallets = Object.keys(wl);
-      if (wallets.length) {
-        const watchResults = await Promise.all(wallets.slice(0, 15).map(async wallet => {
-          try {
-            const [positions, trades] = await Promise.all([
-              api('positions', { user: wallet, limit: 100, sortBy: 'CURRENT', sortDirection: 'DESC' }),
-              api('trades', { user: wallet, limit: 20, takerOnly: 'true' }),
-            ]);
-            const open = positions.filter(p => p.currentValue > 1);
-            const recentBuys = trades.filter(t => t.side === 'BUY' && (Date.now() / 1000 - t.timestamp) < 7200);
-            return { wallet, name: wl[wallet].name, open, recentBuys };
-          } catch { return { wallet, name: wl[wallet].name, open: [], recentBuys: [] }; }
-        }));
-
-        for (const wr of watchResults) {
-          if (paper.open.length >= MAX_POSITIONS) break;
-          for (const buy of wr.recentBuys) {
-            if (paper.open.length >= MAX_POSITIONS) break;
-            const tradeKey = `${buy.title}|||${buy.outcome}`;
-            if (paper.open.some(o => o.key === tradeKey)) continue;
-            if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
-
-            const size = positionSize(paper.balance, 'watchlist', 1);
-            if (size < 5 || size > paper.balance) continue;
-
-            const shares = size / buy.price;
-            paper.open.push({
-              key: tradeKey, title: buy.title, outcome: buy.outcome,
-              entry: buy.price, shares, cost: size,
-              strength: 'watchlist', traders: 1,
-              source: 'watchlist', sourceTrader: wr.name,
-              openedAt: Date.now(), highWaterMark: buy.price
-            });
-            paper.balance -= size;
-            watchlistPlaced++;
-            if (watchlistPlaced >= 3) break;
-          }
-        }
-
-        for (const wr of watchResults) {
-          if (paper.open.length >= MAX_POSITIONS) break;
-          for (const pos of wr.open.filter(p => p.currentValue > 500)) {
-            if (paper.open.length >= MAX_POSITIONS) break;
-            const tradeKey = `${pos.title}|||${pos.outcome}`;
-            if (paper.open.some(o => o.key === tradeKey)) continue;
-            if (paper.closed.some(o => o.key === tradeKey && Date.now() - o.closedAt < 86400000)) continue;
-
-            const gap = pos.avgPrice > 0 ? Math.abs(pos.curPrice - pos.avgPrice) / pos.avgPrice : 1;
-            if (gap > 0.15) continue;
-
-            const size = positionSize(paper.balance, 'watchlist', 1);
-            if (size < 5 || size > paper.balance) continue;
-
-            const shares = size / pos.curPrice;
-            paper.open.push({
-              key: tradeKey, title: pos.title, outcome: pos.outcome,
-              entry: pos.curPrice, shares, cost: size,
-              strength: 'watchlist', traders: 1,
-              source: 'watchlist', sourceTrader: wr.name,
-              openedAt: Date.now(), highWaterMark: pos.curPrice
-            });
-            paper.balance -= size;
-            watchlistPlaced++;
-            if (watchlistPlaced >= 5) break;
-          }
-        }
-      }
-    }
-
-    savePaper(paper);
-    return { placed, watchlistPlaced, consensusExits, paper };
   } catch (e) {
-    savePaper(paper);
-    return { placed, watchlistPlaced, consensusExits, paper, error: e.message };
+    alert('Migration failed: ' + e.message);
   }
-}
-
-async function updateOpenPrices(paper) {
-  if (!paper.open.length) return paper;
-
-  try {
-    const lb = await api('leaderboard', { window: '1w', rankType: 'pnl', limit: 10 });
-    const allPos = [];
-    for (const u of lb.slice(0, 3)) {
-      try {
-        const pos = await api('positions', { user: u.proxyWallet, limit: 200 });
-        allPos.push(...pos);
-      } catch {}
-    }
-
-    // Also fetch positions from watchlist traders for better price coverage
-    const wl = getWatchlist();
-    const wlWallets = Object.keys(wl).slice(0, 5);
-    for (const w of wlWallets) {
-      try {
-        const pos = await api('positions', { user: w, limit: 100 });
-        allPos.push(...pos);
-      } catch {}
-    }
-
-    for (const op of paper.open) {
-      const [title, outcome] = op.key.split('|||');
-      const match = allPos.find(p => p.title === title && p.outcome === outcome);
-      if (match) {
-        op.currentPrice = match.curPrice;
-        if (!op.highWaterMark || match.curPrice > op.highWaterMark) op.highWaterMark = match.curPrice;
-      } else if (!op.currentPrice) {
-        op.currentPrice = op.entry;
-      }
-    }
-  } catch {}
-  return paper;
-}
-
-function closePaperPosition(idx) {
-  const paper = getPaper();
-  const pos = paper.open[idx];
-  if (!pos) return;
-  const value = pos.shares * (pos.currentPrice || pos.entry);
-  const pnl = value - pos.cost;
-  paper.balance += value;
-  paper.closed.push({ ...pos, closedAt: Date.now(), exitPrice: pos.currentPrice || pos.entry, pnl, value, closeReason: 'manual' });
-  paper.open.splice(idx, 1);
-  savePaper(paper);
-  loadPaper();
 }
 
 function getWeeklyRetro(paper) {
@@ -1353,35 +1070,43 @@ async function loadPaper() {
   const el = $('paper-body');
   el.innerHTML = '<div class="status">Loading paper trading portfolio…</div>';
 
-  let paper = getPaper();
-  const wlCount = Object.keys(getWatchlist()).length;
-
-  // Step 1: Auto-trade (opens new positions)
-  if (paper.autoTrade && paper.open.length < MAX_POSITIONS) {
-    el.innerHTML = '<div class="status">Scanning consensus signals + watchlist activity…</div>';
-    const result = await runAutoTrade();
-    paper = result.paper;
-    if (result.placed > 0 || result.watchlistPlaced > 0 || result.consensusExits > 0) {
-      const parts = [];
-      if (result.placed > 0) parts.push(`${result.placed} consensus`);
-      if (result.watchlistPlaced > 0) parts.push(`${result.watchlistPlaced} watchlist`);
-      if (result.consensusExits > 0) parts.push(`${result.consensusExits} consensus-exit`);
-      el.innerHTML = `<div class="status">${parts.join(' + ')} trade(s). Updating prices…</div>`;
+  let state;
+  try {
+    state = await getServerState(true);
+  } catch (e) {
+    el.innerHTML = '<div class="status" style="color:var(--bad)">Failed to connect to server. Make sure Upstash Redis is configured.</div>';
+    // Show migration banner if localStorage has data
+    const localPaper = JSON.parse(localStorage.getItem('pm_paper') || 'null');
+    if (localPaper) {
+      el.innerHTML += '<div class="alert" style="margin-top:12px">Local data found. <button class="watch-btn" onclick="migrateToServer()">Migrate to server</button></div>';
     }
+    return;
   }
 
-  // Step 2: Update prices
-  paper = await updateOpenPrices(paper);
+  let paper = state.portfolio;
+  const wlCount = Object.keys(state.watchlist || {}).length;
+  const lastRun = state.lastRun;
+  const runLog = state.runLog || [];
 
-  // Step 3: Auto-close (TP/SL/trailing)
-  const closeResult = runAutoClose(paper);
-  savePaper(paper);
+  // Show migration banner if localStorage has data but server is empty
+  const localPaper = JSON.parse(localStorage.getItem('pm_paper') || 'null');
+  const migrated = localStorage.getItem('pm_migrated');
+  if (localPaper && !migrated && paper.open.length === 0 && paper.closed.length === 0) {
+    el.innerHTML = '<div class="alert" style="margin-bottom:12px">You have existing paper trading data in this browser. <button class="watch-btn" onclick="migrateToServer()" style="margin-left:8px">Migrate to server</button> to enable autonomous 24/7 trading.</div>';
+    return;
+  }
 
-  // Step 4: Fetch news for open positions (non-blocking)
+  // Fetch news for open positions (client-side only)
   let newsData = {};
   if (paper.open.length) {
     el.innerHTML = '<div class="status">Fetching live news for your positions…</div>';
     newsData = await fetchNewsForPositions(paper.open);
+  }
+
+  const closeResult = { closed: 0, reasons: {} };
+  if (runLog.length && runLog[0].closed > 0) {
+    closeResult.closed = runLog[0].closed;
+    closeResult.reasons = runLog[0].closeReasons || {};
   }
 
   const openValue = paper.open.reduce((a, p) => a + p.shares * (p.currentPrice || p.entry), 0);
@@ -1399,6 +1124,16 @@ async function loadPaper() {
   if (closeResult.closed > 0) {
     const reasons = Object.entries(closeResult.reasons).map(([r, c]) => `${c} ${r}`).join(', ');
     html += `<div class="alert"><strong>Auto-closed ${closeResult.closed} position(s):</strong> ${reasons}</div>`;
+  }
+
+  // Server status
+  if (lastRun) {
+    const lastRunAgo = Math.round((Date.now() - lastRun) / 60000);
+    const runLabel = lastRunAgo < 1 ? 'just now' : lastRunAgo < 60 ? `${lastRunAgo}m ago` : `${Math.round(lastRunAgo / 60)}h ago`;
+    html += `<div class="alert" style="background:rgba(74,222,128,.08); border-color:rgba(74,222,128,.2)">
+      <span style="color:var(--good); font-weight:600">Autonomous mode active</span> —
+      engine last ran ${runLabel}. Trading continues even when this tab is closed.
+    </div>`;
   }
 
   // Strategy controls
@@ -1594,7 +1329,7 @@ async function loadPaper() {
     html += '<div class="status">No closed trades yet. Positions will auto-close at +25% (take profit) or -20% (stop loss).</div>';
   }
 
-  html += `<div class="muted" style="margin-top:14px">Paper account started with ${fmtUsd(PAPER_STARTING_BALANCE)} · Created ${new Date(paper.created).toLocaleDateString()} · Auto-refreshing every 90s · All trades are simulated — no real money.</div>`;
+  html += `<div class="muted" style="margin-top:14px">Paper account started with ${fmtUsd(PAPER_STARTING_BALANCE)} · Created ${new Date(paper.created).toLocaleDateString()} · Server-side autonomous trading · All trades are simulated — no real money.</div>`;
 
   el.innerHTML = html;
 }
@@ -1632,6 +1367,9 @@ function renderPositionTable(allPositions, sourceFilter) {
   html += '</tbody></table>';
   return html;
 }
+
+// Pre-fetch server state so getWatchlist() works synchronously in other tabs
+getServerState().catch(() => {});
 
 // Auto-refresh watchlist every 60s
 watchlistTimer = setInterval(() => { if (currentTab === 'watchlist') loadWatchlist(); }, 60000);

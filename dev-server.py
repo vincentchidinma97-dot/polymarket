@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local dev server that mimics the Vercel layout: /api/proxy?endpoint=X and static files."""
+"""Local dev server that mimics the Vercel layout: /api/proxy, /api/news, /api/state, /api/cron/trade."""
 import json
 import subprocess
 import urllib.parse
@@ -8,8 +8,33 @@ from pathlib import Path
 
 PORT = 8788
 ROOT = Path(__file__).parent / "public"
+STATE_FILE = Path(__file__).parent / "dev-state.json"
 DATA_API = "https://data-api.polymarket.com"
 ALLOWED = {"leaderboard": "/v1/leaderboard", "trades": "/trades", "positions": "/positions", "activity": "/activity"}
+
+STARTING_BALANCE = 10000
+
+
+def load_state():
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {
+        "portfolio": {
+            "balance": STARTING_BALANCE, "open": [], "closed": [],
+            "autoTrade": True, "mirrorWatchlist": True, "autoClose": True,
+            "minConsensus": 6, "created": 0,
+        },
+        "watchlist": {},
+        "lastRun": None,
+        "runLog": [],
+    }
+
+
+def save_state(state):
+    STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -19,10 +44,99 @@ class Handler(BaseHTTPRequestHandler):
             self.proxy(parsed.query)
         elif parsed.path == "/api/news":
             self.news(parsed.query)
+        elif parsed.path == "/api/state":
+            self.get_state()
+        elif parsed.path == "/api/cron/trade":
+            self.cron_trade()
         elif parsed.path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html; charset=utf-8")
         else:
             self.send_error(404)
+
+    def do_PUT(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/state":
+            self.put_state()
+        else:
+            self.send_error(404)
+
+    def get_state(self):
+        state = load_state()
+        result = json.dumps({
+            "portfolio": state["portfolio"],
+            "watchlist": state.get("watchlist", {}),
+            "lastRun": state.get("lastRun"),
+            "runLog": state.get("runLog", [])[:10],
+        })
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(result.encode())
+
+    def put_state(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length))
+        state = load_state()
+        t = body.get("type")
+        data = body.get("data", {})
+
+        if t == "settings":
+            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "minConsensus"):
+                if k in data:
+                    state["portfolio"][k] = data[k]
+        elif t == "watchlist":
+            state["watchlist"] = data
+        elif t == "watchlist_toggle":
+            wl = state.get("watchlist", {})
+            wallet = data.get("wallet")
+            if wallet in wl:
+                del wl[wallet]
+            else:
+                wl[wallet] = {"name": data.get("name", ""), "addedAt": 0, "lastPositionCount": None}
+            state["watchlist"] = wl
+        elif t == "close_position":
+            p = state["portfolio"]
+            idx = data.get("index", -1)
+            if 0 <= idx < len(p["open"]):
+                pos = p["open"].pop(idx)
+                cur = pos.get("currentPrice", pos.get("entry", 0))
+                val = pos.get("shares", 0) * cur
+                pnl = val - pos.get("cost", 0)
+                p["balance"] += val
+                pos["closedAt"] = 0
+                pos["exitPrice"] = cur
+                pos["pnl"] = pnl
+                pos["value"] = val
+                pos["closeReason"] = "manual"
+                p["closed"].append(pos)
+        elif t == "reset":
+            state["portfolio"] = {
+                "balance": STARTING_BALANCE, "open": [], "closed": [],
+                "autoTrade": True, "mirrorWatchlist": True, "autoClose": True,
+                "minConsensus": 6, "created": 0,
+            }
+            state["runLog"] = []
+            state["lastRun"] = None
+        elif t == "migrate":
+            if data.get("portfolio"):
+                state["portfolio"] = data["portfolio"]
+            if data.get("watchlist"):
+                state["watchlist"] = data["watchlist"]
+
+        save_state(state)
+        result = json.dumps({"ok": True})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(result.encode())
+
+    def cron_trade(self):
+        result = json.dumps({"skipped": True, "reason": "cron not available in dev mode — use the deployed version"})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(result.encode())
 
     def proxy(self, query):
         params = urllib.parse.parse_qs(query)
