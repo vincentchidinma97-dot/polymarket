@@ -11,9 +11,21 @@
   ],
   "headers": [
     {
-      "source": "/api/(.*)",
+      "source": "/api/proxy",
       "headers": [
         { "key": "Cache-Control", "value": "s-maxage=30, stale-while-revalidate=60" }
+      ]
+    },
+    {
+      "source": "/api/state",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    },
+    {
+      "source": "/api/cron/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" }
       ]
     }
   ]
