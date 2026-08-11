@@ -19,7 +19,10 @@ export default async function handler(req, res) {
   const authHeader = req.headers.authorization;
   const isDashboard = req.query.source === 'dashboard';
 
-  if (!isVercelCron && !isDashboard && (!cronSecret || authHeader !== `Bearer ${cronSecret}`)) {
+  const queryKey = req.query.key;
+  const hasValidAuth = authHeader === `Bearer ${cronSecret}` || queryKey === cronSecret;
+
+  if (!isVercelCron && !isDashboard && (!cronSecret || !hasValidAuth)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 
