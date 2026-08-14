@@ -438,6 +438,24 @@ function importWatchlist(e) {
   reader.readAsText(file); e.target.value = '';
 }
 
+/* ===== MANUAL TRADING ===== */
+async function manualBuy(title, outcome, slug, price, traders, e) {
+  if (e) e.stopPropagation();
+  const amt = prompt(`Buy "${outcome}" at ${(price * 100).toFixed(1)}¢ — how many $ of your paper balance?`, '100');
+  if (amt === null) return;
+  const size = parseFloat(amt);
+  if (!Number.isFinite(size) || size < 5) { alert('Minimum trade is $5.'); return; }
+  const r = await stateAPI('manual_trade', { title, outcome, slug, price, size, traders });
+  if (r.ok) {
+    if (e && e.target) { e.target.textContent = '✓ Bought'; e.target.disabled = true; }
+  } else if (r.error && !r.busy) {
+    alert('Trade failed: ' + r.error);
+  }
+}
+function buyBtnHtml(title, outcome, slug, price, traders) {
+  return `<button class="watch-btn" style="border-color:var(--accent);color:var(--accent)" onclick="manualBuy('${jsq(title)}','${jsq(outcome)}','${jsq(slug)}',${price},${traders || 0},event)">Buy</button>`;
+}
+
 /* ===== SIGNALS ENGINE ===== */
 async function loadSignals() {
   const el = $('signals-body');
@@ -524,7 +542,7 @@ async function loadSignals() {
           ${copyable ? '<span class="badge new" style="background:var(--good-bg);color:var(--good)">Copyable</span>' : '<span class="badge" style="background:var(--bad-bg);color:var(--bad)">Moved</span>'}
           <div style="font-size:14px;font-weight:500;margin-top:4px">${esc(c.title)}</div>
           <div class="muted">Outcome: <strong style="color:var(--ink)">${esc(c.outcome)}</strong></div></div>
-          <div style="text-align:right"><div style="font-size:14px;font-weight:500">${fmtUsd(c.totalValue)}</div><div class="muted">Avg: ${fmtCents(avgEntry)} → ${fmtCents(avgNow)}</div></div>
+          <div style="text-align:right"><div style="font-size:14px;font-weight:500">${fmtUsd(c.totalValue)}</div><div class="muted">Avg: ${fmtCents(avgEntry)} → ${fmtCents(avgNow)}</div><div style="margin-top:5px">${avgNow > 0.01 && avgNow < 0.99 ? buyBtnHtml(c.title, c.outcome, c.slug, avgNow, c.traders.length) : ''}</div></div>
         </div>
         <div class="chip-row">${c.traders.map(t => `<span class="chip" onclick="openTrader('${esc(t.wallet)}','${esc(t.name)}')">${esc(t.name)} <span class="muted">#${t.rank}</span></span>`).join('')}</div>
       </div>`;
@@ -533,14 +551,15 @@ async function loadSignals() {
 
     html += `<div class="sec-hdr"><h2>Still copyable</h2><span class="sec-count">${copyablePositions.length}</span></div>`;
     if (copyablePositions.length) {
-      html += `<div class="scroll"><table><thead><tr><th>Trader</th><th>Market</th><th>Outcome</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Gap</th><th class="num">Value</th></tr></thead><tbody>`;
+      html += `<div class="scroll"><table><thead><tr><th>Trader</th><th>Market</th><th>Outcome</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Gap</th><th class="num">Value</th><th></th></tr></thead><tbody>`;
       for (const p of copyablePositions.slice(0, 30)) {
         html += `<tr class="click" onclick="openTrader('${esc(p.traderWallet)}','${esc(p.traderName)}')">
           <td><span style="color:var(--accent)">${esc(p.traderName)}</span><div class="muted">#${p.traderRank}</div></td>
           <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.title)}</td>
           <td>${esc(p.outcome)}</td><td class="num">${fmtCents(p.avgPrice)}</td><td class="num">${fmtCents(p.curPrice)}</td>
           <td class="num" style="color:${p.gap < 0.05 ? 'var(--good)' : p.gap < 0.15 ? 'var(--warn)' : 'var(--bad)'}">${(p.gap * 100).toFixed(1)}%</td>
-          <td class="num">${fmtUsd(p.currentValue)}</td></tr>`;
+          <td class="num">${fmtUsd(p.currentValue)}</td>
+          <td>${p.curPrice > 0.01 && p.curPrice < 0.99 ? buyBtnHtml(p.title, p.outcome, p.slug, p.curPrice, 1) : ''}</td></tr>`;
       }
       html += '</tbody></table></div>';
     }
@@ -763,6 +782,8 @@ async function loadCrypto() {
       html += '<div class="muted" style="margin-bottom:10px">Fair value from a lognormal model on 90-day realized volatility. A gap is a lead, not a guarantee — the model has no view on news or vol regime changes.</div>';
       for (const o of data.opportunities) {
         const under = o.edge > 0;
+        const buyOutcome = under ? 'Yes' : 'No';
+        const buyPrice = under ? o.market : Math.round((1 - o.market) * 100) / 100;
         html += `<div class="arb-card">
           <div class="arb-hdr">
             <div><div class="arb-title">${esc(o.question)}</div><div class="muted" style="margin-top:1px">${esc(o.coin)} · spot $${o.spot.toLocaleString()} · resolves ${new Date(o.endDate).toLocaleDateString()}</div></div>
@@ -772,6 +793,7 @@ async function loadCrypto() {
             <div class="arb-plat"><div class="arb-logo" style="background:#0066FF">P</div><span style="color:var(--ink3)">Market</span><span style="font-weight:500;font-variant-numeric:tabular-nums">${(o.market*100).toFixed(0)}¢</span></div>
             <div class="arb-plat"><div class="arb-logo" style="background:#4D7A36">ƒ</div><span style="color:var(--ink3)">Model</span><span style="font-weight:500;font-variant-numeric:tabular-nums">${(o.model*100).toFixed(0)}¢</span></div>
             <span class="arb-dir">${under ? 'YES looks underpriced' : 'YES looks overpriced'}</span>
+            ${buyPrice > 0.01 && buyPrice < 0.99 ? buyBtnHtml(o.question, buyOutcome, o.slug, buyPrice, 0) : ''}
           </div>
         </div>`;
       }
@@ -972,6 +994,7 @@ async function loadPaper() {
   const consensusTrades = paper.open.filter(p => p.source === 'consensus');
   const watchlistTrades = paper.open.filter(p => p.source === 'watchlist');
   const cryptoTrades = paper.open.filter(p => p.source === 'crypto');
+  const manualTrades = paper.open.filter(p => p.source === 'manual');
   const winCount = paper.closed.filter(t => t.pnl > 0).length;
   const winRate = paper.closed.length ? Math.round(winCount / paper.closed.length * 100) : 0;
 
@@ -981,7 +1004,7 @@ async function loadPaper() {
   html += '<div class="metrics">';
   html += `<div class="metric"><div class="metric-label">Portfolio value</div><div class="metric-val">${fmtUsd2(totalValue)}</div><div class="metric-sub">Cash: ${fmtUsd2(paper.balance)}</div></div>`;
   html += `<div class="metric"><div class="metric-label">Total return</div><div class="metric-val ${cls(totalReturn)}">${fmtUsd2(totalReturn)}</div><div class="metric-sub">${(totalReturn / PAPER_STARTING_BALANCE * 100).toFixed(1)}% all time</div></div>`;
-  html += `<div class="metric"><div class="metric-label">Open / max</div><div class="metric-val">${paper.open.length} / ${MAX_POSITIONS}</div><div class="metric-sub">${consensusTrades.length} consensus · ${watchlistTrades.length} watchlist · ${cryptoTrades.length} crypto</div></div>`;
+  html += `<div class="metric"><div class="metric-label">Open / max</div><div class="metric-val">${paper.open.length} / ${MAX_POSITIONS}</div><div class="metric-sub">${consensusTrades.length} consensus · ${cryptoTrades.length} crypto${manualTrades.length ? ` · ${manualTrades.length} manual` : ''}${watchlistTrades.length ? ` · ${watchlistTrades.length} watchlist` : ''}</div></div>`;
   html += `<div class="metric"><div class="metric-label">Win rate</div><div class="metric-val">${winRate}%</div><div class="metric-sub">${winCount}W / ${paper.closed.length - winCount}L</div></div>`;
   html += '</div>';
 
@@ -1019,7 +1042,7 @@ async function loadPaper() {
       html += `<div class="pos-card" style="${nearTP ? 'border-left:2px solid var(--good)' : nearSL ? 'border-left:2px solid var(--bad)' : ''}">
         <div class="pos-icon">${catIcon(p.title)}</div>
         <div class="pos-info"><div class="pos-title">${esc(p.title)}${statusBadge}</div>
-          <div class="pos-meta"><span>${esc(p.outcome)}</span><span class="accent-c">${p.source === 'crypto' ? `model ${fmtCents(p.modelPrice || 0)} · ${p.edge > 0 ? '+' : ''}${p.edge ?? '?'}¢ edge` : `${p.traders || '?'} traders`}</span><span>Entry: ${fmtCents(p.entry)}</span><span>→ ${fmtCents(cur)}</span><span>${fmtUsd2(val)}</span></div>
+          <div class="pos-meta"><span>${esc(p.outcome)}</span><span class="accent-c">${p.source === 'crypto' ? `model ${fmtCents(p.modelPrice || 0)} · ${p.edge > 0 ? '+' : ''}${p.edge ?? '?'}¢ edge` : p.source === 'manual' ? 'your pick' : `${p.traders || '?'} traders`}</span><span>Entry: ${fmtCents(p.entry)}</span><span>→ ${fmtCents(cur)}</span><span>${fmtUsd2(val)}</span></div>
         </div>
         <div class="pos-pnl"><div class="pos-pnl-val ${cls(pnl)}">${fmtUsd2(pnl)}</div><div class="pos-pnl-pct ${cls(pnl)}">${pnlPct}%</div></div>
         <button class="watch-btn" onclick="closePaperPosition('${jsq(p.key)}')" style="font-size:10px">Close</button>

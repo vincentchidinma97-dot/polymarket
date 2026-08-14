@@ -1,5 +1,5 @@
 import { redis, KEYS } from '../lib/redis.js';
-import { PAPER_STARTING_BALANCE } from '../lib/constants.js';
+import { PAPER_STARTING_BALANCE, MAX_POSITIONS } from '../lib/constants.js';
 
 function defaultPortfolio() {
   return {
@@ -32,7 +32,7 @@ export default async function handler(req, res) {
     // The cron engine read-modify-writes the portfolio over many seconds;
     // a concurrent mutation here would be silently overwritten by its final
     // write. Reject portfolio mutations while the engine lock is held.
-    const MUTATES_PORTFOLIO = ['close_position', 'settings', 'reset', 'migrate'];
+    const MUTATES_PORTFOLIO = ['close_position', 'manual_trade', 'settings', 'reset', 'migrate'];
     if (MUTATES_PORTFOLIO.includes(type)) {
       const lock = await redis.get(KEYS.ENGINE_LOCK);
       if (lock) return res.status(409).json({ error: 'engine_running', busy: true });
@@ -53,6 +53,30 @@ export default async function handler(req, res) {
       portfolio.open.splice(idx, 1);
       await redis.set(KEYS.PORTFOLIO, portfolio);
       return res.status(200).json({ ok: true, pnl });
+    }
+
+    if (type === 'manual_trade') {
+      const portfolio = await redis.get(KEYS.PORTFOLIO) || defaultPortfolio();
+      const { title, outcome, slug, price, size, traders } = data || {};
+      const entry = parseFloat(price);
+      const amt = parseFloat(size);
+      if (!title || !outcome || !Number.isFinite(entry) || entry <= 0.01 || entry >= 0.99) {
+        return res.status(400).json({ error: 'invalid market' });
+      }
+      if (!Number.isFinite(amt) || amt < 5) return res.status(400).json({ error: 'minimum trade is $5' });
+      if (amt > portfolio.balance) return res.status(400).json({ error: 'insufficient balance' });
+      if (portfolio.open.length >= MAX_POSITIONS) return res.status(400).json({ error: 'book is full (20 positions)' });
+      const key = `${title}|||${outcome}`;
+      if (portfolio.open.some(p => p.key === key)) return res.status(409).json({ error: 'position already open' });
+      portfolio.open.push({
+        key, title, outcome, slug: slug || undefined,
+        entry, shares: amt / entry, cost: amt,
+        strength: 'manual', traders: traders || 0, source: 'manual',
+        openedAt: Date.now(), highWaterMark: entry,
+      });
+      portfolio.balance -= amt;
+      await redis.set(KEYS.PORTFOLIO, portfolio);
+      return res.status(200).json({ ok: true, balance: portfolio.balance });
     }
 
     if (type === 'settings') {

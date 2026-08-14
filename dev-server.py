@@ -96,6 +96,19 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 wl[wallet] = {"name": data.get("name", ""), "addedAt": 0, "lastPositionCount": None}
             state["watchlist"] = wl
+        elif t == "manual_trade":
+            p = state["portfolio"]
+            entry = float(data.get("price") or 0)
+            amt = float(data.get("size") or 0)
+            key = f"{data.get('title')}|||{data.get('outcome')}"
+            if 0.01 < entry < 0.99 and 5 <= amt <= p["balance"] and not any(o.get("key") == key for o in p["open"]):
+                p["open"].append({
+                    "key": key, "title": data.get("title"), "outcome": data.get("outcome"),
+                    "slug": data.get("slug"), "entry": entry, "shares": amt / entry, "cost": amt,
+                    "strength": "manual", "traders": data.get("traders") or 0, "source": "manual",
+                    "openedAt": int(time.time() * 1000), "highWaterMark": entry,
+                })
+                p["balance"] -= amt
         elif t == "close_position":
             p = state["portfolio"]
             idx = data.get("index", -1)
