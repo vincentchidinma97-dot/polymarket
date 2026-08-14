@@ -1,78 +1,84 @@
-const KALSHI_API = 'https://trading-api.kalshi.com/trade-api/v2';
+const KALSHI_API = 'https://api.elections.kalshi.com/trade-api/v2';
 const POLY_API = 'https://data-api.polymarket.com';
 
 async function fetchKalshiMarkets() {
-  const categories = ['Politics', 'Economics', 'Tech & Science', 'Crypto'];
+  // The bare /markets listing is dominated by dead provisional combo markets,
+  // so we go through /events with nested markets and keep only liquid ones.
   const markets = [];
+  let cursor = '';
 
-  for (const cat of categories) {
+  for (let page = 0; page < 3; page++) {
     try {
-      const url = `${KALSHI_API}/markets?status=open&limit=50&series_ticker=`;
-      const r = await fetch(`${KALSHI_API}/markets?status=open&limit=100`, {
+      const url = `${KALSHI_API}/events?status=open&limit=200&with_nested_markets=true${cursor ? `&cursor=${cursor}` : ''}`;
+      const r = await fetch(url, {
         headers: { 'User-Agent': 'polymarket-tracker/2.0' },
         signal: AbortSignal.timeout(15000),
       });
-      if (!r.ok) continue;
+      if (!r.ok) break;
       const data = await r.json();
-      if (data.markets) markets.push(...data.markets);
-      break;
-    } catch { continue; }
-  }
-
-  return markets
-    .filter(m => m.status === 'open' && m.yes_bid !== undefined)
-    .map(m => ({
-      ticker: m.ticker,
-      title: m.title || m.event_ticker,
-      subtitle: m.subtitle || '',
-      category: m.category || '',
-      yes_price: parseFloat(m.yes_bid) || parseFloat(m.last_price) || 0,
-      no_price: parseFloat(m.no_bid) || 0,
-      volume: m.volume || 0,
-      platform: 'kalshi',
-    }));
-}
-
-async function fetchPolymarketEvents() {
-  try {
-    const lb = await fetch(`${POLY_API}/v1/leaderboard?window=1w&rankType=pnl&limit=20`, {
-      headers: { 'User-Agent': 'polymarket-tracker/2.0' },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!lb.ok) return [];
-    const traders = await lb.json();
-
-    const positionSets = await Promise.all(
-      traders.slice(0, 10).map(async t => {
-        try {
-          const r = await fetch(`${POLY_API}/positions?user=${t.proxyWallet}&limit=100&sortBy=CURRENT&sortDirection=DESC`, {
-            headers: { 'User-Agent': 'polymarket-tracker/2.0' },
-            signal: AbortSignal.timeout(10000),
-          });
-          if (!r.ok) return [];
-          return r.json();
-        } catch { return []; }
-      })
-    );
-
-    const seen = new Map();
-    for (const positions of positionSets) {
-      for (const p of positions) {
-        if (!p.title || p.currentValue < 1) continue;
-        const key = `${p.title}|||${p.outcome}`;
-        if (!seen.has(key)) {
-          seen.set(key, {
-            title: p.title,
-            outcome: p.outcome,
-            slug: p.slug,
-            yes_price: p.outcome === 'Yes' ? p.curPrice : 1 - p.curPrice,
-            platform: 'polymarket',
+      for (const ev of data.events || []) {
+        for (const m of ev.markets || []) {
+          const bid = parseFloat(m.yes_bid_dollars) || 0;
+          const ask = parseFloat(m.yes_ask_dollars) || 0;
+          const vol = parseFloat(m.volume_fp) || m.volume || 0;
+          if (bid <= 0.02 || bid >= 0.98 || vol < 100) continue;
+          markets.push({
+            ticker: m.ticker,
+            title: ev.title || m.title || m.event_ticker,
+            subtitle: m.yes_sub_title || m.subtitle || '',
+            category: ev.category || '',
+            yes_price: ask > bid ? (bid + ask) / 2 : bid,
+            no_price: parseFloat(m.no_bid_dollars) || 0,
+            volume: vol,
+            platform: 'kalshi',
           });
         }
       }
+      cursor = data.cursor;
+      if (!cursor) break;
+    } catch { break; }
+  }
+
+  return markets;
+}
+
+const GAMMA_API = 'https://gamma-api.polymarket.com';
+
+async function fetchPolymarketEvents() {
+  // Top markets by volume from the Gamma API — the whole liquid universe,
+  // not just what a handful of leaderboard traders happen to hold.
+  const markets = [];
+  try {
+    const pages = await Promise.all([0, 1, 2, 3].map(async offset => {
+      const r = await fetch(`${GAMMA_API}/markets?closed=false&limit=500&offset=${offset * 500}&order=volumeNum&ascending=false`, {
+        headers: { 'User-Agent': 'polymarket-tracker/2.0' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!r.ok) return [];
+      return r.json();
+    }));
+
+    for (const page of pages) {
+      for (const m of page) {
+        if (!m.question || !m.outcomePrices) continue;
+        let outcomes, prices;
+        try { outcomes = JSON.parse(m.outcomes); prices = JSON.parse(m.outcomePrices); } catch { continue; }
+        const yesIdx = outcomes.findIndex(o => o === 'Yes');
+        if (yesIdx < 0) continue; // only binary Yes/No markets compare cleanly
+        const yes = parseFloat(prices[yesIdx]) || 0;
+        if (yes <= 0.02 || yes >= 0.98) continue;
+        markets.push({
+          title: m.question,
+          outcome: 'Yes',
+          slug: m.slug,
+          yes_price: yes,
+          volume: parseFloat(m.volumeNum) || 0,
+          platform: 'polymarket',
+        });
+      }
     }
-    return Array.from(seen.values());
-  } catch { return []; }
+  } catch {}
+  return markets;
 }
 
 function normalizeTitle(t) {
@@ -92,6 +98,47 @@ function similarityScore(a, b) {
   return overlap / Math.max(wordsA.size, wordsB.size);
 }
 
+function yearsOf(t) {
+  return new Set((t.match(/\b20\d{2}\b/g) || []));
+}
+
+function yearsCompatible(a, b) {
+  const ya = yearsOf(a), yb = yearsOf(b);
+  if (!ya.size || !yb.size) return true;
+  for (const y of ya) if (yb.has(y)) return true;
+  return false;
+}
+
+const NEGATION = /\bnot\b|\bwon't\b|\bwithout\b/i;
+
+const NOUN_STOP = new Set(['will', 'who', 'what', 'when', 'which', 'before', 'after', 'the', 'next', 'first', 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']);
+
+function properNouns(t) {
+  const out = new Set();
+  for (const w of (t.match(/\b[A-Z][a-zA-Z]{3,}\b/g) || [])) {
+    const lw = w.toLowerCase();
+    if (!NOUN_STOP.has(lw)) out.add(lw);
+  }
+  return out;
+}
+
+function entitiesOverlap(a, b) {
+  const na = properNouns(a), nb = properNouns(b);
+  if (!na.size && !nb.size) return true;
+  if (!na.size || !nb.size) return false;
+  const [small, large] = na.size <= nb.size ? [na, nb] : [nb, na];
+  for (const n of small) if (!large.has(n)) return false;
+  return true;
+}
+
+function semanticsCompatible(a, b) {
+  // "run for" vs "win" are different questions even when every other word matches
+  const winA = /\bwin\b|\bwinner\b/i.test(a), runA = /\brun for\b|\brun in\b|\bcandidate\b/i.test(a);
+  const winB = /\bwin\b|\bwinner\b/i.test(b), runB = /\brun for\b|\brun in\b|\bcandidate\b/i.test(b);
+  if ((winA && !winB && runB) || (winB && !winA && runA)) return false;
+  return true;
+}
+
 function matchMarkets(kalshiMarkets, polyMarkets) {
   const matches = [];
 
@@ -100,17 +147,25 @@ function matchMarkets(kalshiMarkets, polyMarkets) {
     let bestScore = 0;
 
     for (const p of polyMarkets) {
-      const score = similarityScore(k.title + ' ' + k.subtitle, p.title);
-      if (score > bestScore && score >= 0.4) {
+      const kText = k.title + ' ' + k.subtitle;
+      if (!yearsCompatible(kText, p.title)) continue;
+      if (!semanticsCompatible(kText, p.title)) continue;
+      if (!entitiesOverlap(kText, p.title)) continue;
+      const score = similarityScore(kText, p.title);
+      if (score > bestScore && score >= 0.65) {
         bestScore = score;
         bestMatch = p;
       }
     }
 
     if (bestMatch && k.yes_price > 0 && bestMatch.yes_price > 0) {
-      const spread = Math.abs(k.yes_price - bestMatch.yes_price);
+      // One side phrased as a negation means YES on one platform ≈ NO on the other
+      const kNeg = NEGATION.test(k.title + ' ' + k.subtitle), pNeg = NEGATION.test(bestMatch.title);
+      const inverted = kNeg !== pNeg;
+      const polyYes = inverted ? 1 - bestMatch.yes_price : bestMatch.yes_price;
+      const spread = Math.abs(k.yes_price - polyYes);
       if (spread >= 0.03) {
-        const buyPlatform = k.yes_price < bestMatch.yes_price ? 'kalshi' : 'polymarket';
+        const buyPlatform = k.yes_price < polyYes ? 'kalshi' : 'polymarket';
         const sellPlatform = buyPlatform === 'kalshi' ? 'polymarket' : 'kalshi';
         matches.push({
           kalshi: {
@@ -128,6 +183,7 @@ function matchMarkets(kalshiMarkets, polyMarkets) {
           },
           spread: Math.round(spread * 100),
           matchScore: Math.round(bestScore * 100),
+          inverted,
           direction: `Buy ${buyPlatform}, sell ${sellPlatform}`,
           buyPlatform,
           category: k.category,
