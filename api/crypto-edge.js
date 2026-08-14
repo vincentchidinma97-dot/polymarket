@@ -1,0 +1,159 @@
+const GAMMA_API = 'https://gamma-api.polymarket.com';
+const COINGECKO_API = 'https://api.coingecko.com/api/v3';
+
+const COINS = {
+  bitcoin: { id: 'bitcoin', match: /\bbitcoin\b|\bbtc\b/i },
+  ethereum: { id: 'ethereum', match: /\bethereum\b|\beth\b/i },
+  solana: { id: 'solana', match: /\bsolana\b|\bsol\b/i },
+  xrp: { id: 'ripple', match: /\bxrp\b/i },
+  dogecoin: { id: 'dogecoin', match: /\bdogecoin\b|\bdoge\b/i },
+};
+
+// Standard normal CDF (Abramowitz & Stegun approximation)
+function normCdf(x) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp(-x * x / 2);
+  let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x > 0 ? 1 - p : p;
+}
+
+async function fetchCoinStats(coinKey) {
+  const { id } = COINS[coinKey];
+  const r = await fetch(`${COINGECKO_API}/coins/${id}/market_chart?vs_currency=usd&days=90&interval=daily`, {
+    headers: { 'User-Agent': 'polymarket-tracker/2.0' },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) return null;
+  const data = await r.json();
+  const prices = (data.prices || []).map(p => p[1]);
+  if (prices.length < 10) return null;
+  const spot = prices[prices.length - 1];
+  const rets = [];
+  for (let i = 1; i < prices.length; i++) rets.push(Math.log(prices[i] / prices[i - 1]));
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, r2) => a + (r2 - mean) ** 2, 0) / (rets.length - 1);
+  const vol = Math.sqrt(variance) * Math.sqrt(365); // annualized realized vol
+  return { spot, vol };
+}
+
+function coinFor(question) {
+  for (const [key, c] of Object.entries(COINS)) if (c.match.test(question)) return key;
+  return null;
+}
+
+function parseStrike(question) {
+  const m = question.match(/\$([\d,]+(?:\.\d+)?)/);
+  if (!m) return null;
+  return parseFloat(m[1].replace(/,/g, ''));
+}
+
+// P(terminal price above strike) under driftless lognormal
+function probAbove(spot, strike, vol, T) {
+  if (T <= 0) return spot > strike ? 1 : 0;
+  const d2 = (Math.log(spot / strike) - (vol * vol * T) / 2) / (vol * Math.sqrt(T));
+  return normCdf(d2);
+}
+
+function modelProbability(kind, spot, strike, vol, T) {
+  if (kind === 'above') return probAbove(spot, strike, vol, T);
+  if (kind === 'reach') {
+    // one-touch above: reflection principle, ≈ 2× terminal probability
+    if (strike <= spot) return 0.99;
+    return Math.min(0.99, 2 * probAbove(spot, strike, vol, T));
+  }
+  if (kind === 'dip') {
+    if (strike >= spot) return 0.99;
+    return Math.min(0.99, 2 * (1 - probAbove(spot, strike, vol, T)));
+  }
+  return null;
+}
+
+function classify(question) {
+  if (/be above \$/i.test(question)) return 'above';
+  if (/\breach \$/i.test(question)) return 'reach';
+  if (/\bdip to \$/i.test(question)) return 'dip';
+  return null; // between / less-than / up-or-down need different handling
+}
+
+async function fetchCryptoMarkets() {
+  const markets = [];
+  try {
+    const r = await fetch(`${GAMMA_API}/events?closed=false&limit=100&order=volume24hr&ascending=false&tag_slug=crypto`, {
+      headers: { 'User-Agent': 'polymarket-tracker/2.0' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) return markets;
+    for (const ev of await r.json()) {
+      for (const m of ev.markets || []) {
+        if (!m.question || !m.outcomePrices) continue;
+        let prices;
+        try { prices = JSON.parse(m.outcomePrices); } catch { continue; }
+        const yes = parseFloat(prices[0]);
+        if (!Number.isFinite(yes)) continue;
+        markets.push({ question: m.question, slug: m.slug, yes, endDate: m.endDate, volume: parseFloat(m.volumeNum) || 0 });
+      }
+    }
+  } catch {}
+  return markets;
+}
+
+export default async function handler(req, res) {
+  try {
+    const markets = await fetchCryptoMarkets();
+
+    const neededCoins = new Set();
+    for (const m of markets) { const c = coinFor(m.question); if (c) neededCoins.add(c); }
+
+    const coinStats = {};
+    await Promise.all([...neededCoins].map(async c => { coinStats[c] = await fetchCoinStats(c); }));
+
+    const opportunities = [];
+    let scanned = 0;
+    for (const m of markets) {
+      const kind = classify(m.question);
+      const coin = coinFor(m.question);
+      const strike = parseStrike(m.question);
+      const stats = coin && coinStats[coin];
+      if (!kind || !coin || !strike || !stats) continue;
+      if (m.yes <= 0.02 || m.yes >= 0.98) continue; // no payoff left to capture
+
+      const T = (new Date(m.endDate).getTime() - Date.now()) / (365 * 86400000);
+      if (!Number.isFinite(T) || T <= 0 || T > 1) continue;
+      scanned++;
+
+      const model = modelProbability(kind, stats.spot, strike, stats.vol, T);
+      if (model === null) continue;
+      const edge = model - m.yes;
+      if (Math.abs(edge) < 0.05) continue;
+
+      opportunities.push({
+        question: m.question,
+        slug: m.slug,
+        coin, kind, strike,
+        endDate: m.endDate,
+        market: Math.round(m.yes * 100) / 100,
+        model: Math.round(model * 100) / 100,
+        edge: Math.round(edge * 100),
+        side: edge > 0 ? 'YES underpriced' : 'YES overpriced',
+        spot: Math.round(stats.spot),
+        volume: Math.round(m.volume),
+      });
+    }
+
+    opportunities.sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge));
+
+    res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600');
+    return res.status(200).json({
+      opportunities: opportunities.slice(0, 40),
+      stats: {
+        cryptoMarkets: markets.length,
+        scanned,
+        flagged: opportunities.length,
+        coins: Object.fromEntries(Object.entries(coinStats).filter(([, v]) => v).map(([k, v]) => [k, { spot: Math.round(v.spot), vol: Math.round(v.vol * 100) }])),
+      },
+      ts: Date.now(),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+}

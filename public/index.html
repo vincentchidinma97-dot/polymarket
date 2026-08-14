@@ -217,7 +217,8 @@
       <div class="nav-item" onclick="goPage('lb',this)">🏆 <span>Leaderboard</span></div>
       <div class="nav-item" onclick="goPage('new',this)">✨ <span>New winners</span></div>
       <div class="nav-sec"><span>Cross-market</span></div>
-      <div class="nav-item" onclick="goPage('arbitrage',this)">⚡ <span>Arbitrage</span><span class="nav-badge">New</span></div>
+      <div class="nav-item" onclick="goPage('arbitrage',this)">⚡ <span>Arbitrage</span></div>
+      <div class="nav-item" onclick="goPage('crypto',this)">🪙 <span>Crypto edge</span><span class="nav-badge">New</span></div>
       <div class="nav-sec"><span>System</span></div>
       <div class="nav-item" onclick="goPage('settings',this)">⚙️ <span>Strategy</span></div>
     </div>
@@ -314,6 +315,15 @@
         <div id="arb-body" class="scroll"><div class="status">Click "Scan now" to find opportunities…</div></div>
       </div>
 
+      <!-- Crypto edge -->
+      <div id="pg-crypto" class="page">
+        <div class="page-hdr">
+          <div><div class="page-title">Crypto edge</div><div class="page-sub">Polymarket crypto odds vs a volatility-based fair-value model</div></div>
+          <button class="btn primary" onclick="loadCrypto()">🪙 Scan now</button>
+        </div>
+        <div id="crypto-body" class="scroll"><div class="status">Click "Scan now" to compare market odds against the model…</div></div>
+      </div>
+
       <!-- Settings -->
       <div id="pg-settings" class="page">
         <div class="page-hdr"><div class="page-title">Strategy controls</div></div>
@@ -377,7 +387,7 @@ async function api(endpoint, params) {
 }
 
 /* ===== NAVIGATION ===== */
-const ALL_PAGES = ['portfolio','signals','watchlist','whale','lb','new','arbitrage','settings','trader'];
+const ALL_PAGES = ['portfolio','signals','watchlist','whale','lb','new','arbitrage','crypto','settings','trader'];
 function goPage(page, el) {
   if (page !== 'trader') prevPage = currentPage;
   currentPage = page;
@@ -393,6 +403,7 @@ function goPage(page, el) {
   if (page === 'whale') loadWhales();
   if (page === 'lb') loadLeaderboard();
   if (page === 'new') loadNewWinners();
+  if (page === 'crypto') loadCrypto();
   if (page === 'settings') loadSettings();
 }
 
@@ -726,6 +737,49 @@ async function loadArbitrage() {
   } catch (e) { el.innerHTML = `<div class="status">Failed to scan: ${esc(e.message)}</div>`; }
 }
 
+/* ===== CRYPTO EDGE ===== */
+async function loadCrypto() {
+  const el = $('crypto-body'); el.innerHTML = '<div class="status">Fetching crypto markets and computing fair values…<br>This takes ~15 seconds.</div>';
+  try {
+    const r = await fetch('/api/crypto-edge');
+    if (!r.ok) throw new Error('API error ' + r.status);
+    const data = await r.json();
+    const coins = data.stats.coins || {};
+    let html = '';
+    html += '<div class="metrics">';
+    for (const [name, c] of Object.entries(coins)) {
+      html += `<div class="metric"><div class="metric-label">${esc(name)}</div><div class="metric-val">$${c.spot.toLocaleString()}</div><div class="metric-sub">${c.vol}% realized vol (90d)</div></div>`;
+    }
+    html += '</div>';
+    html += '<div class="metrics">';
+    html += `<div class="metric"><div class="metric-label">Markets scanned</div><div class="metric-val">${data.stats.scanned}</div><div class="metric-sub">of ${data.stats.cryptoMarkets} crypto markets</div></div>`;
+    html += `<div class="metric"><div class="metric-label">Flagged</div><div class="metric-val">${data.stats.flagged}</div><div class="metric-sub">Model vs market gap ≥ 5¢</div></div>`;
+    html += '</div>';
+
+    if (data.opportunities.length) {
+      html += `<div class="sec-hdr"><h2>Model disagreements</h2><span class="sec-count">${data.opportunities.length}</span></div>`;
+      html += '<div class="muted" style="margin-bottom:10px">Fair value from a lognormal model on 90-day realized volatility. A gap is a lead, not a guarantee — the model has no view on news or vol regime changes.</div>';
+      for (const o of data.opportunities) {
+        const under = o.edge > 0;
+        html += `<div class="arb-card">
+          <div class="arb-hdr">
+            <div><div class="arb-title">${esc(o.question)}</div><div class="muted" style="margin-top:1px">${esc(o.coin)} · spot $${o.spot.toLocaleString()} · resolves ${new Date(o.endDate).toLocaleDateString()}</div></div>
+            <div class="arb-spread" style="${under ? '' : 'color:var(--bad);background:var(--bad-bg)'}">${under ? '+' : ''}${o.edge}¢ ${under ? 'cheap' : 'rich'}</div>
+          </div>
+          <div class="arb-prices">
+            <div class="arb-plat"><div class="arb-logo" style="background:#0066FF">P</div><span style="color:var(--ink3)">Market</span><span style="font-weight:500;font-variant-numeric:tabular-nums">${(o.market*100).toFixed(0)}¢</span></div>
+            <div class="arb-plat"><div class="arb-logo" style="background:#4D7A36">ƒ</div><span style="color:var(--ink3)">Model</span><span style="font-weight:500;font-variant-numeric:tabular-nums">${(o.model*100).toFixed(0)}¢</span></div>
+            <span class="arb-dir">${under ? 'YES looks underpriced' : 'YES looks overpriced'}</span>
+          </div>
+        </div>`;
+      }
+    } else {
+      html += '<div class="status">No model disagreements ≥ 5¢ right now.</div>';
+    }
+    el.innerHTML = html;
+  } catch (e) { el.innerHTML = `<div class="status">Failed to scan: ${esc(e.message)}</div>`; }
+}
+
 /* ===== SETTINGS ===== */
 async function loadSettings() {
   const el = $('settings-body');
@@ -798,6 +852,61 @@ async function fetchNewsForPositions(positions) {
   return results;
 }
 
+let _equityPts = [];
+function equityCurveSvg(closed) {
+  const sorted = [...closed].filter(t => t.closedAt).sort((a, b) => a.closedAt - b.closedAt);
+  let eq = PAPER_STARTING_BALANCE;
+  const pts = [{ t: sorted[0].closedAt, v: eq }];
+  for (const tr of sorted) { eq += tr.pnl; pts.push({ t: tr.closedAt, v: eq }); }
+  _equityPts = pts;
+  const W = 700, H = 150, PAD = 8;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
+  const vMin = Math.min(...pts.map(p => p.v)), vMax = Math.max(...pts.map(p => p.v));
+  const span = Math.max(vMax - vMin, 50), y0 = vMin - span * 0.08, y1 = vMax + span * 0.08;
+  const x = t => PAD + (W - 2 * PAD) * (t1 === t0 ? 0.5 : (t - t0) / (t1 - t0));
+  const y = v => H - PAD - (H - 2 * PAD) * ((v - y0) / (y1 - y0));
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const area = line + `L${x(t1).toFixed(1)},${H - PAD}L${x(t0).toFixed(1)},${H - PAD}Z`;
+  const base = y(PAPER_STARTING_BALANCE);
+  const last = pts[pts.length - 1].v;
+  return `<div style="position:relative" id="eq-wrap">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:150px;display:block" id="eq-svg">
+      ${base > PAD && base < H - PAD ? `<line x1="${PAD}" y1="${base.toFixed(1)}" x2="${W - PAD}" y2="${base.toFixed(1)}" stroke="var(--border2)" stroke-width="1" stroke-dasharray="4,4" vector-effect="non-scaling-stroke"/>` : ''}
+      <path d="${area}" fill="var(--accent)" opacity="0.08"/>
+      <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+      <line id="eq-cross" x1="0" y1="${PAD}" x2="0" y2="${H - PAD}" stroke="var(--ink3)" stroke-width="1" vector-effect="non-scaling-stroke" style="display:none"/>
+      <circle id="eq-dot" r="3.5" fill="var(--accent)" stroke="var(--s1)" stroke-width="2" style="display:none"/>
+    </svg>
+    <div style="display:flex;justify-content:space-between;margin-top:2px" class="muted"><span>${fmtUsd(PAPER_STARTING_BALANCE)} start</span><span class="${cls(last - PAPER_STARTING_BALANCE)}" style="font-weight:600">${fmtUsd2(last)} now</span></div>
+    <div id="eq-tip" style="position:absolute;top:0;left:0;display:none;background:var(--s2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:10px;pointer-events:none;white-space:nowrap;z-index:5"></div>
+  </div>`;
+}
+function bindEquityHover() {
+  const svg = $('eq-svg'), tip = $('eq-tip'), cross = $('eq-cross'), dot = $('eq-dot');
+  if (!svg || !_equityPts.length) return;
+  const W = 700, H = 150, PAD = 8;
+  const pts = _equityPts;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
+  const vMin = Math.min(...pts.map(p => p.v)), vMax = Math.max(...pts.map(p => p.v));
+  const span = Math.max(vMax - vMin, 50), yy0 = vMin - span * 0.08, yy1 = vMax + span * 0.08;
+  const xOf = t => PAD + (W - 2 * PAD) * (t1 === t0 ? 0.5 : (t - t0) / (t1 - t0));
+  const yOf = v => H - PAD - (H - 2 * PAD) * ((v - yy0) / (yy1 - yy0));
+  svg.addEventListener('mousemove', e => {
+    const r = svg.getBoundingClientRect();
+    const vx = (e.clientX - r.left) / r.width * W;
+    let best = pts[0], bd = Infinity;
+    for (const p of pts) { const d = Math.abs(xOf(p.t) - vx); if (d < bd) { bd = d; best = p; } }
+    cross.setAttribute('x1', xOf(best.t)); cross.setAttribute('x2', xOf(best.t)); cross.style.display = '';
+    dot.setAttribute('cx', xOf(best.t)); dot.setAttribute('cy', yOf(best.v)); dot.style.display = '';
+    tip.textContent = `${new Date(best.t).toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${fmtUsd2(best.v)}`;
+    tip.style.display = '';
+    const px = (xOf(best.t) / W) * r.width;
+    tip.style.left = Math.min(Math.max(px - 40, 0), r.width - 110) + 'px';
+    tip.style.top = (yOf(best.v) / H * r.height - 30) + 'px';
+  });
+  svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; cross.style.display = 'none'; dot.style.display = 'none'; });
+}
+
 function getWeeklyRetro(paper) {
   const weekAgo = Date.now() - 7 * 86400000; const weekTrades = paper.closed.filter(t => t.closedAt >= weekAgo);
   if (!weekTrades.length) return null;
@@ -864,6 +973,19 @@ async function loadPaper() {
   html += `<div class="metric"><div class="metric-label">Win rate</div><div class="metric-val">${winRate}%</div><div class="metric-sub">${winCount}W / ${paper.closed.length - winCount}L</div></div>`;
   html += '</div>';
 
+  // Equity curve + per-source split
+  if (paper.closed.length >= 2) {
+    const srcAgg = {};
+    for (const t of paper.closed) { const s = t.source || 'consensus'; if (!srcAgg[s]) srcAgg[s] = { pnl: 0, n: 0 }; srcAgg[s].pnl += t.pnl; srcAgg[s].n++; }
+    html += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">';
+    html += `<div class="metric" style="flex:2;min-width:280px"><div class="metric-label">Realized equity</div>${equityCurveSvg(paper.closed)}</div>`;
+    html += '<div style="flex:1;min-width:150px;display:flex;flex-direction:column;gap:10px">';
+    for (const [src, a] of Object.entries(srcAgg).sort((x, y) => y[1].pnl - x[1].pnl)) {
+      html += `<div class="metric" style="flex:1"><div class="metric-label">${esc(src)}</div><div class="metric-val ${cls(a.pnl)}">${fmtUsd2(a.pnl)}</div><div class="metric-sub">${a.n} closed trade${a.n === 1 ? '' : 's'}</div></div>`;
+    }
+    html += '</div></div>';
+  }
+
   // Sub-tabs
   html += `<div class="tabs" id="port-tabs">
     <div class="tab active" onclick="portTab('open',this)">Open<span class="tab-count">${paper.open.length}</span></div>
@@ -879,9 +1001,11 @@ async function loadPaper() {
     for (let i = 0; i < paper.open.length; i++) {
       const p = paper.open[i], cur = p.currentPrice || p.entry, val = p.shares * cur, pnl = val - p.cost, pnlPct = p.cost > 0 ? (pnl / p.cost * 100).toFixed(1) : '0.0';
       const nearTP = pnl / p.cost >= TAKE_PROFIT_PCT * 0.8, nearSL = pnl / p.cost <= STOP_LOSS_PCT * 0.8;
+      const isStale = !p.resolved && !p.slug && (!p.currentPrice || p.currentPrice === p.entry) && (Date.now() - (p.openedAt || 0)) > 24 * 3600000;
+      const statusBadge = p.resolved ? '<span class="badge hot">resolving</span>' : isStale ? '<span class="badge" style="background:var(--warn-bg);color:var(--warn)">stale price</span>' : '';
       html += `<div class="pos-card" style="${nearTP ? 'border-left:2px solid var(--good)' : nearSL ? 'border-left:2px solid var(--bad)' : ''}">
         <div class="pos-icon">${catIcon(p.title)}</div>
-        <div class="pos-info"><div class="pos-title">${esc(p.title)}</div>
+        <div class="pos-info"><div class="pos-title">${esc(p.title)}${statusBadge}</div>
           <div class="pos-meta"><span>${esc(p.outcome)}</span><span class="accent-c">${p.traders || '?'} traders</span><span>Entry: ${fmtCents(p.entry)}</span><span>→ ${fmtCents(cur)}</span><span>${fmtUsd2(val)}</span></div>
         </div>
         <div class="pos-pnl"><div class="pos-pnl-val ${cls(pnl)}">${fmtUsd2(pnl)}</div><div class="pos-pnl-pct ${cls(pnl)}">${pnlPct}%</div></div>
@@ -963,6 +1087,7 @@ async function loadPaper() {
 
   html += `<div class="muted" style="margin-top:14px;text-align:center">Paper account · Started ${fmtUsd(PAPER_STARTING_BALANCE)} · Server-side autonomous · All trades simulated</div>`;
   el.innerHTML = html;
+  bindEquityHover();
 }
 
 function portTab(tab, el) {
