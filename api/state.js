@@ -29,16 +29,28 @@ export default async function handler(req, res) {
   if (req.method === 'PUT') {
     const { type, data } = req.body;
 
+    // The cron engine read-modify-writes the portfolio over many seconds;
+    // a concurrent mutation here would be silently overwritten by its final
+    // write. Reject portfolio mutations while the engine lock is held.
+    const MUTATES_PORTFOLIO = ['close_position', 'settings', 'reset', 'migrate'];
+    if (MUTATES_PORTFOLIO.includes(type)) {
+      const lock = await redis.get(KEYS.ENGINE_LOCK);
+      if (lock) return res.status(409).json({ error: 'engine_running', busy: true });
+    }
+
     if (type === 'close_position') {
       const portfolio = await redis.get(KEYS.PORTFOLIO);
       if (!portfolio) return res.status(404).json({ error: 'no portfolio' });
-      const pos = portfolio.open[data.index];
-      if (!pos) return res.status(400).json({ error: 'invalid index' });
-      const value = pos.shares * (pos.currentPrice || pos.entry);
+      // Prefer the stable key — indexes shift when the engine closes positions
+      const idx = data.key ? portfolio.open.findIndex(p => p.key === data.key) : data.index;
+      const pos = portfolio.open[idx];
+      if (!pos) return res.status(400).json({ error: 'position not found' });
+      const exitPrice = pos.currentPrice ?? pos.entry;
+      const value = pos.shares * exitPrice;
       const pnl = value - pos.cost;
       portfolio.balance += value;
-      portfolio.closed.push({ ...pos, closedAt: Date.now(), exitPrice: pos.currentPrice || pos.entry, pnl, value, closeReason: 'manual' });
-      portfolio.open.splice(data.index, 1);
+      portfolio.closed.push({ ...pos, closedAt: Date.now(), exitPrice, pnl, value, closeReason: 'manual' });
+      portfolio.open.splice(idx, 1);
       await redis.set(KEYS.PORTFOLIO, portfolio);
       return res.status(200).json({ ok: true, pnl });
     }
@@ -48,6 +60,7 @@ export default async function handler(req, res) {
       if (data.autoTrade !== undefined) portfolio.autoTrade = data.autoTrade;
       if (data.mirrorWatchlist !== undefined) portfolio.mirrorWatchlist = data.mirrorWatchlist;
       if (data.autoClose !== undefined) portfolio.autoClose = data.autoClose;
+      if (data.cryptoTrade !== undefined) portfolio.cryptoTrade = data.cryptoTrade;
       if (data.minConsensus !== undefined) portfolio.minConsensus = parseInt(data.minConsensus);
       await redis.set(KEYS.PORTFOLIO, portfolio);
       return res.status(200).json({ ok: true });

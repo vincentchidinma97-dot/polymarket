@@ -1,5 +1,4 @@
 const KALSHI_API = 'https://api.elections.kalshi.com/trade-api/v2';
-const POLY_API = 'https://data-api.polymarket.com';
 
 async function fetchKalshiMarkets() {
   // The bare /markets listing is dominated by dead provisional combo markets,
@@ -89,24 +88,18 @@ function normalizeTitle(t) {
     .trim();
 }
 
-function similarityScore(a, b) {
-  const wordsA = new Set(normalizeTitle(a).split(' ').filter(w => w.length > 2));
-  const wordsB = new Set(normalizeTitle(b).split(' ').filter(w => w.length > 2));
-  if (!wordsA.size || !wordsB.size) return 0;
-  let overlap = 0;
-  for (const w of wordsA) if (wordsB.has(w)) overlap++;
-  return overlap / Math.max(wordsA.size, wordsB.size);
-}
-
 function yearsOf(t) {
   return new Set((t.match(/\b20\d{2}\b/g) || []));
 }
 
-function yearsCompatible(a, b) {
-  const ya = yearsOf(a), yb = yearsOf(b);
-  if (!ya.size || !yb.size) return true;
-  for (const y of ya) if (yb.has(y)) return true;
+function setsIntersect(a, b) {
+  for (const x of a) if (b.has(x)) return true;
   return false;
+}
+
+function setContained(small, large) {
+  for (const x of small) if (!large.has(x)) return false;
+  return true;
 }
 
 const NEGATION = /\bnot\b|\bwon't\b|\bwithout\b/i;
@@ -122,46 +115,65 @@ function properNouns(t) {
   return out;
 }
 
-function entitiesOverlap(a, b) {
-  const na = properNouns(a), nb = properNouns(b);
-  if (!na.size && !nb.size) return true;
-  if (!na.size || !nb.size) return false;
-  const [small, large] = na.size <= nb.size ? [na, nb] : [nb, na];
-  for (const n of small) if (!large.has(n)) return false;
+const WIN_RE = /\bwin\b|\bwinner\b/i;
+const RUN_RE = /\brun for\b|\brun in\b|\bcandidate\b/i;
+
+// Everything the pair checks need, computed once per market instead of once
+// per pair — the loop below is O(K×P) over thousands of markets.
+function marketFeatures(text) {
+  return {
+    text,
+    words: new Set(normalizeTitle(text).split(' ').filter(w => w.length > 2)),
+    years: yearsOf(text),
+    nouns: properNouns(text),
+    negated: NEGATION.test(text),
+    win: WIN_RE.test(text),
+    run: RUN_RE.test(text),
+  };
+}
+
+function featuresCompatible(a, b) {
+  if (a.years.size && b.years.size && !setsIntersect(a.years, b.years)) return false;
+  // "run for" vs "win" are different questions even when every other word matches
+  if ((a.win && !b.win && b.run) || (b.win && !a.win && a.run)) return false;
+  if (a.nouns.size !== 0 || b.nouns.size !== 0) {
+    if (!a.nouns.size || !b.nouns.size) return false;
+    const [small, large] = a.nouns.size <= b.nouns.size ? [a.nouns, b.nouns] : [b.nouns, a.nouns];
+    if (!setContained(small, large)) return false;
+  }
   return true;
 }
 
-function semanticsCompatible(a, b) {
-  // "run for" vs "win" are different questions even when every other word matches
-  const winA = /\bwin\b|\bwinner\b/i.test(a), runA = /\brun for\b|\brun in\b|\bcandidate\b/i.test(a);
-  const winB = /\bwin\b|\bwinner\b/i.test(b), runB = /\brun for\b|\brun in\b|\bcandidate\b/i.test(b);
-  if ((winA && !winB && runB) || (winB && !winA && runA)) return false;
-  return true;
+function wordOverlapScore(a, b) {
+  if (!a.words.size || !b.words.size) return 0;
+  let overlap = 0;
+  for (const w of a.words) if (b.words.has(w)) overlap++;
+  return overlap / Math.max(a.words.size, b.words.size);
 }
 
 function matchMarkets(kalshiMarkets, polyMarkets) {
   const matches = [];
+  const polyFeats = polyMarkets.map(p => ({ p, f: marketFeatures(p.title) }));
 
   for (const k of kalshiMarkets) {
+    const kf = marketFeatures(k.title + ' ' + k.subtitle);
     let bestMatch = null;
     let bestScore = 0;
 
-    for (const p of polyMarkets) {
-      const kText = k.title + ' ' + k.subtitle;
-      if (!yearsCompatible(kText, p.title)) continue;
-      if (!semanticsCompatible(kText, p.title)) continue;
-      if (!entitiesOverlap(kText, p.title)) continue;
-      const score = similarityScore(kText, p.title);
+    let bestFeat = null;
+    for (const { p, f } of polyFeats) {
+      if (!featuresCompatible(kf, f)) continue;
+      const score = wordOverlapScore(kf, f);
       if (score > bestScore && score >= 0.65) {
         bestScore = score;
         bestMatch = p;
+        bestFeat = f;
       }
     }
 
     if (bestMatch && k.yes_price > 0 && bestMatch.yes_price > 0) {
       // One side phrased as a negation means YES on one platform ≈ NO on the other
-      const kNeg = NEGATION.test(k.title + ' ' + k.subtitle), pNeg = NEGATION.test(bestMatch.title);
-      const inverted = kNeg !== pNeg;
+      const inverted = kf.negated !== bestFeat.negated;
       const polyYes = inverted ? 1 - bestMatch.yes_price : bestMatch.yes_price;
       const spread = Math.abs(k.yes_price - polyYes);
       if (spread >= 0.03) {

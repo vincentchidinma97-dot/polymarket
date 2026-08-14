@@ -1,6 +1,7 @@
 import { redis, KEYS } from '../../lib/redis.js';
 import { PAPER_STARTING_BALANCE, MIN_RUN_INTERVAL_MS } from '../../lib/constants.js';
 import { runAutoTrade } from '../../lib/engine/auto-trade.js';
+import { runCryptoTrade } from '../../lib/engine/crypto-trade.js';
 import { runAutoClose } from '../../lib/engine/auto-close.js';
 import { updateOpenPrices } from '../../lib/engine/price-update.js';
 import { scoutInsiders } from '../../lib/engine/scout.js';
@@ -31,11 +32,18 @@ export default async function handler(req, res) {
     return res.status(200).json({ skipped: true, reason: 'too_soon', nextRunIn: Math.ceil((MIN_RUN_INTERVAL_MS - (Date.now() - lastRun)) / 1000) });
   }
 
+  // Atomic admission + write barrier: only one run at a time, and dashboard
+  // mutations are rejected while the lock is held (see api/state.js).
+  const gotLock = await redis.set(KEYS.ENGINE_LOCK, Date.now(), { nx: true, ex: 120 });
+  if (!gotLock) {
+    return res.status(200).json({ skipped: true, reason: 'already_running' });
+  }
+
   let portfolio = await redis.get(KEYS.PORTFOLIO) || defaultPortfolio();
   let watchlist = await redis.get(KEYS.WATCHLIST) || {};
   let consensusSnapshot = await redis.get(KEYS.CONSENSUS_SNAPSHOT) || {};
 
-  let placed = 0, watchlistPlaced = 0, consensusExits = 0, closedCount = 0, closeReasons = {}, scouted = 0;
+  let placed = 0, watchlistPlaced = 0, consensusExits = 0, closedCount = 0, closeReasons = {}, scouted = 0, cryptoPlaced = 0;
 
   try {
     if (portfolio.autoTrade) {
@@ -46,6 +54,10 @@ export default async function handler(req, res) {
       placed = tradeResult.placed;
       watchlistPlaced = tradeResult.watchlistPlaced;
       consensusExits = tradeResult.consensusExits;
+
+      const cryptoResult = await runCryptoTrade(portfolio);
+      portfolio = cryptoResult.portfolio;
+      cryptoPlaced = cryptoResult.cryptoPlaced;
     }
 
     portfolio = await updateOpenPrices(portfolio, watchlist);
@@ -69,7 +81,7 @@ export default async function handler(req, res) {
 
   const logEntry = {
     ts: Date.now(),
-    placed, watchlistPlaced, consensusExits, closed: closedCount, closeReasons, scouted,
+    placed, watchlistPlaced, consensusExits, cryptoPlaced, closed: closedCount, closeReasons, scouted,
     openCount: portfolio.open.length,
     balance: Math.round(portfolio.balance * 100) / 100,
   };
@@ -81,6 +93,7 @@ export default async function handler(req, res) {
   pipe.set(KEYS.LAST_RUN, Date.now());
   pipe.lpush(KEYS.RUN_LOG, JSON.stringify(logEntry));
   pipe.ltrim(KEYS.RUN_LOG, 0, 49);
+  pipe.del(KEYS.ENGINE_LOCK);
   await pipe.exec();
 
   return res.status(200).json({ success: true, ...logEntry });

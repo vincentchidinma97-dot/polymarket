@@ -2,6 +2,7 @@
 """Local dev server that mimics the Vercel layout: /api/proxy, /api/news, /api/state, /api/cron/trade."""
 import json
 import subprocess
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -82,7 +83,7 @@ class Handler(BaseHTTPRequestHandler):
         data = body.get("data", {})
 
         if t == "settings":
-            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "minConsensus"):
+            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "cryptoTrade", "minConsensus"):
                 if k in data:
                     state["portfolio"][k] = data[k]
         elif t == "watchlist":
@@ -98,13 +99,15 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "close_position":
             p = state["portfolio"]
             idx = data.get("index", -1)
+            if data.get("key"):
+                idx = next((i for i, pos in enumerate(p["open"]) if pos.get("key") == data["key"]), -1)
             if 0 <= idx < len(p["open"]):
                 pos = p["open"].pop(idx)
                 cur = pos.get("currentPrice", pos.get("entry", 0))
                 val = pos.get("shares", 0) * cur
                 pnl = val - pos.get("cost", 0)
                 p["balance"] += val
-                pos["closedAt"] = 0
+                pos["closedAt"] = int(time.time() * 1000)
                 pos["exitPrice"] = cur
                 pos["pnl"] = pnl
                 pos["value"] = val
