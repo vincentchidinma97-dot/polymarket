@@ -350,6 +350,8 @@ const cls = n => n > 0 ? 'good' : n < 0 ? 'bad' : '';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // For values embedded in a '...'-quoted JS string inside an onclick attribute
 const jsq = s => esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+// Shared bullish/bearish/neutral color for TA stances and news sentiment
+const stanceColor = s => s === 'bullish' ? 'var(--good)' : s === 'bearish' ? 'var(--bad)' : 'var(--ink3)';
 const short = w => w ? w.slice(0, 6) + '…' + w.slice(-4) : '';
 const displayName = u => {
   if (!u.userName || /^0x[0-9a-fA-F]{40}/.test(u.userName)) return short(u.proxyWallet);
@@ -769,8 +771,8 @@ async function loadCrypto() {
     let html = '';
     html += '<div class="metrics">';
     for (const [name, c] of Object.entries(coins)) {
-      const taColor = t => t === 'bullish' ? 'var(--good)' : t === 'bearish' ? 'var(--bad)' : 'var(--ink3)';
-      const taLine = c.ta ? ` · RSI ${c.ta.rsi} · <span style="color:${taColor(c.ta.label)}">${c.ta.label}</span>` : '';
+      const volArrow = c.ta && c.ta.volRising != null ? (c.ta.volRising ? ' · vol ↑' : ' · vol ↓') : '';
+      const taLine = c.ta ? ` · RSI ${c.ta.rsi}${volArrow} · <span style="color:${stanceColor(c.ta.label)}">${c.ta.label}</span>` : '';
       html += `<div class="metric"><div class="metric-label">${esc(name)}</div><div class="metric-val">$${c.spot.toLocaleString()}</div><div class="metric-sub">${c.vol}% ${c.volSource === 'deribit' ? 'implied vol' : 'realized vol'}${taLine}</div></div>`;
     }
     if (data.stats.fng) {
@@ -804,7 +806,7 @@ async function loadCrypto() {
       }
       html += '<div class="muted" style="margin-top:8px;font-size:10px"><span style="color:var(--accent)">■</span> model said · <span style="color:var(--good)">■</span> actually happened — bars should match when the model is honest. Brier: perfect = 0, coin-flip = 0.25.</div>';
       if (cal.byTA) {
-        const parts = ['agrees', 'neutral', 'against'].filter(k => cal.byTA[k]).map(k => `TA ${k}: ${cal.byTA[k].brier} (n=${cal.byTA[k].n})`);
+        const parts = ['agrees', 'neutral', 'against', 'unknown'].filter(k => cal.byTA[k]).map(k => `TA ${k}: ${cal.byTA[k].brier} (n=${cal.byTA[k].n})`);
         if (parts.length >= 2) html += `<div class="muted" style="margin-top:4px;font-size:10px">Brier by TA alignment — ${parts.join(' · ')}. If "agrees" isn't clearly lower, the TA veto isn't earning its keep.</div>`;
       }
       html += '</div></div>';
@@ -855,10 +857,17 @@ async function loadSettings() {
     const tpLabel = tpVal === null ? 'TP off' : `+${Math.round(tpVal * 100)}% TP`;
     const slLabel = slVal === null ? 'SL off' : `-${Math.round(slVal * 100)}% SL`;
     html += `<div class="toggle-row"><span class="toggle-label">Auto-close (TP/SL)</span><div class="toggle ${paper.autoClose !== false ? 'on' : ''}" onclick="toggleAutoClose()"></div><span class="toggle-hint">${paper.autoClose !== false ? `${tpLabel} · ${slLabel}` : 'Off'}</span></div>`;
-    const tpOpt = (v, label) => `<option value="${v}" ${String(tpVal) === String(v === 'off' ? null : parseFloat(v)) ? 'selected' : ''}>${label}</option>`;
-    const slOpt = (v, label) => `<option value="${v}" ${String(slVal) === String(v === 'off' ? null : parseFloat(v)) ? 'selected' : ''}>${label}</option>`;
-    html += `<div class="toggle-row"><span class="toggle-label">Take-profit</span><select onchange="setTakeProfit(this.value)">${tpOpt('0.15', '+15%')}${tpOpt('0.25', '+25%')}${tpOpt('0.4', '+40%')}${tpOpt('0.6', '+60%')}${tpOpt('off', 'Off — hold to resolution')}</select><span class="toggle-hint">Bank winners at this gain</span></div>`;
-    html += `<div class="toggle-row"><span class="toggle-label">Stop-loss</span><select onchange="setStopLoss(this.value)">${slOpt('0.1', '−10%')}${slOpt('0.15', '−15%')}${slOpt('0.2', '−20%')}${slOpt('0.3', '−30%')}${slOpt('off', 'Off — no stop')}</select><span class="toggle-hint">Cut losers at this loss</span></div>`;
+    // One builder for both selects; values outside the presets (set via API,
+    // within the server clamp) render as an explicit "(custom)" option instead
+    // of silently displaying the first preset.
+    const pctSelect = (cur, presets, offLabel, sign) => {
+      const opt = (v, label) => `<option value="${v}" ${String(cur) === String(v === 'off' ? null : parseFloat(v)) ? 'selected' : ''}>${label}</option>`;
+      let opts = presets.map(v => opt(String(v), `${sign}${Math.round(v * 100)}%`)).join('') + opt('off', offLabel);
+      if (cur !== null && !presets.includes(cur)) opts = `<option value="${cur}" selected>${sign}${Math.round(cur * 100)}% (custom)</option>` + opts;
+      return opts;
+    };
+    html += `<div class="toggle-row"><span class="toggle-label">Take-profit</span><select onchange="setTakeProfit(this.value)">${pctSelect(tpVal, [0.15, 0.25, 0.4, 0.6], 'Off — hold to resolution', '+')}</select><span class="toggle-hint">Bank winners at this gain</span></div>`;
+    html += `<div class="toggle-row"><span class="toggle-label">Stop-loss</span><select onchange="setStopLoss(this.value)">${pctSelect(slVal, [0.1, 0.15, 0.2, 0.3], 'Off — no stop', '−')}</select><span class="toggle-hint">Cut losers at this loss</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Crypto edge trading</span><div class="toggle ${paper.cryptoTrade !== false ? 'on' : ''}" onclick="toggleCryptoTrade()"></div><span class="toggle-hint">${paper.cryptoTrade !== false ? 'Max 4 pos · $150 each · 10¢+ edge · 2–60d out · holds to resolution' : 'Off'}</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">TA veto on crypto</span><div class="toggle ${paper.cryptoTaFilter !== false ? 'on' : ''}" onclick="toggleCryptoTaFilter()"></div><span class="toggle-hint">${paper.cryptoTaFilter !== false ? 'Skips bets that fight trend + momentum + volume' : 'Off — model edge alone decides'}</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Min consensus</span><select onchange="setMinConsensus(this.value)"><option value="6" ${(paper.minConsensus||6)===6?'selected':''}>6+ traders</option><option value="10" ${(paper.minConsensus||6)===10?'selected':''}>10+</option><option value="15" ${(paper.minConsensus||6)===15?'selected':''}>15+</option><option value="20" ${(paper.minConsensus||6)===20?'selected':''}>20+</option></select><span class="toggle-hint">Higher = fewer trades</span></div>`;
@@ -1156,7 +1165,7 @@ async function loadPaper() {
   if (hasNews.length) {
     for (const key of hasNews) {
       const nd = newsData[key]; const pos = paper.open.find(p => p.key === key); if (!pos || !nd.items.length) continue;
-      const sentColor = nd.sentiment === 'bullish' ? 'var(--good)' : nd.sentiment === 'bearish' ? 'var(--bad)' : 'var(--ink3)';
+      const sentColor = stanceColor(nd.sentiment);
       html += `<div class="news-card"><div class="news-mkt"><span class="sent-dot" style="background:${sentColor}"></span>${esc(pos.title)} — <span style="color:${sentColor};font-size:10px;font-weight:600;text-transform:uppercase">${nd.sentiment}</span></div>`;
       for (const item of nd.items.slice(0, 4)) {
         const t = newsAgo(item.pubDate);

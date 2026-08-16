@@ -1,5 +1,6 @@
 import { redis, KEYS } from '../../lib/redis.js';
-import { PAPER_STARTING_BALANCE, MIN_RUN_INTERVAL_MS } from '../../lib/constants.js';
+import { MIN_RUN_INTERVAL_MS } from '../../lib/constants.js';
+import { normalizePortfolio } from '../../lib/portfolio.js';
 import { runAutoTrade } from '../../lib/engine/auto-trade.js';
 import { runCryptoTrade } from '../../lib/engine/crypto-trade.js';
 import { scanCryptoEdges } from '../../lib/engine/crypto-edge.js';
@@ -7,14 +8,6 @@ import { updateSignalLog } from '../../lib/engine/signal-log.js';
 import { runAutoClose } from '../../lib/engine/auto-close.js';
 import { updateOpenPrices } from '../../lib/engine/price-update.js';
 import { scoutInsiders } from '../../lib/engine/scout.js';
-
-function defaultPortfolio() {
-  return {
-    balance: PAPER_STARTING_BALANCE, open: [], closed: [],
-    autoTrade: true, mirrorWatchlist: true, autoClose: true,
-    minConsensus: 6, created: Date.now(),
-  };
-}
 
 export default async function handler(req, res) {
   const isVercelCron = req.headers['x-vercel-cron'] === '1';
@@ -41,7 +34,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ skipped: true, reason: 'already_running' });
   }
 
-  let portfolio = await redis.get(KEYS.PORTFOLIO) || defaultPortfolio();
+  let portfolio = normalizePortfolio(await redis.get(KEYS.PORTFOLIO));
   let watchlist = await redis.get(KEYS.WATCHLIST) || {};
   let consensusSnapshot = await redis.get(KEYS.CONSENSUS_SNAPSHOT) || {};
 

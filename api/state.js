@@ -1,13 +1,6 @@
 import { redis, KEYS } from '../lib/redis.js';
-import { PAPER_STARTING_BALANCE, MAX_POSITIONS } from '../lib/constants.js';
-
-function defaultPortfolio() {
-  return {
-    balance: PAPER_STARTING_BALANCE, open: [], closed: [],
-    autoTrade: true, mirrorWatchlist: true, autoClose: true,
-    minConsensus: 6, created: Date.now(),
-  };
-}
+import { MAX_POSITIONS } from '../lib/constants.js';
+import { defaultPortfolio, normalizePortfolio } from '../lib/portfolio.js';
 
 export default async function handler(req, res) {
   if (req.method === 'GET') {
@@ -21,7 +14,7 @@ export default async function handler(req, res) {
 
     const parse = r => typeof r === 'string' ? JSON.parse(r) : r;
     return res.status(200).json({
-      portfolio: portfolio || defaultPortfolio(),
+      portfolio: normalizePortfolio(portfolio),
       watchlist: watchlist || {},
       lastRun: lastRun || null,
       runLog: (runLog || []).map(parse),

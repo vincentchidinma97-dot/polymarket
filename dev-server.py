@@ -84,7 +84,18 @@ class Handler(BaseHTTPRequestHandler):
         data = body.get("data", {})
 
         if t == "settings":
-            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "cryptoTrade", "cryptoTaFilter", "minConsensus", "takeProfitPct", "stopLossPct"):
+            # Numeric levels get the same parse+clamp as production api/state.js
+            for k, lo, hi in (("takeProfitPct", 0.10, 2.0), ("stopLossPct", 0.05, 0.50)):
+                if k in data:
+                    v = data[k]
+                    if v is None:
+                        state["portfolio"][k] = None
+                    else:
+                        try:
+                            state["portfolio"][k] = min(max(float(v), lo), hi)
+                        except (TypeError, ValueError):
+                            pass
+            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "cryptoTrade", "cryptoTaFilter", "minConsensus"):
                 if k in data:
                     state["portfolio"][k] = data[k]
         elif t == "watchlist":
