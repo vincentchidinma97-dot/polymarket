@@ -68,6 +68,7 @@ class Handler(BaseHTTPRequestHandler):
             "watchlist": state.get("watchlist", {}),
             "lastRun": state.get("lastRun"),
             "runLog": state.get("runLog", [])[:10],
+            "equityLog": state.get("equityLog", []),
         })
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

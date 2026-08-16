@@ -2,6 +2,8 @@ import { redis, KEYS } from '../../lib/redis.js';
 import { PAPER_STARTING_BALANCE, MIN_RUN_INTERVAL_MS } from '../../lib/constants.js';
 import { runAutoTrade } from '../../lib/engine/auto-trade.js';
 import { runCryptoTrade } from '../../lib/engine/crypto-trade.js';
+import { scanCryptoEdges } from '../../lib/engine/crypto-edge.js';
+import { updateSignalLog } from '../../lib/engine/signal-log.js';
 import { runAutoClose } from '../../lib/engine/auto-close.js';
 import { updateOpenPrices } from '../../lib/engine/price-update.js';
 import { scoutInsiders } from '../../lib/engine/scout.js';
@@ -44,6 +46,14 @@ export default async function handler(req, res) {
   let consensusSnapshot = await redis.get(KEYS.CONSENSUS_SNAPSHOT) || {};
 
   let placed = 0, watchlistPlaced = 0, consensusExits = 0, closedCount = 0, closeReasons = {}, scouted = 0, cryptoPlaced = 0;
+  let fetchOk = null, tradersTotal = null;
+
+  let signalsLogged = 0, signalsResolved = 0;
+
+  // Scan is hoisted out of runCryptoTrade so signals get logged for
+  // calibration even when the crypto book is full or trading is off.
+  let scan = { opportunities: [] };
+  try { scan = await scanCryptoEdges(); } catch {}
 
   try {
     if (portfolio.autoTrade) {
@@ -54,8 +64,10 @@ export default async function handler(req, res) {
       placed = tradeResult.placed;
       watchlistPlaced = tradeResult.watchlistPlaced;
       consensusExits = tradeResult.consensusExits;
+      fetchOk = tradeResult.fetchOk ?? null;
+      tradersTotal = tradeResult.tradersTotal ?? null;
 
-      const cryptoResult = await runCryptoTrade(portfolio);
+      const cryptoResult = await runCryptoTrade(portfolio, scan.opportunities);
       portfolio = cryptoResult.portfolio;
       cryptoPlaced = cryptoResult.cryptoPlaced;
     }
@@ -69,6 +81,10 @@ export default async function handler(req, res) {
       closeReasons = closeResult.reasons;
     }
 
+    const sig = await updateSignalLog(scan.opportunities);
+    signalsLogged = sig.logged;
+    signalsResolved = sig.resolvedMarked;
+
     const runCount = await redis.incr(KEYS.RUN_COUNT);
     if (runCount % 6 === 0) {
       const scoutResult = await scoutInsiders(watchlist);
@@ -79,11 +95,17 @@ export default async function handler(req, res) {
     console.error('Cron trade error:', e.message);
   }
 
+  const round2 = n => Math.round(n * 100) / 100;
+  const openValue = round2(portfolio.open.reduce((a, p) => a + p.shares * (p.currentPrice ?? p.entry), 0));
+
   const logEntry = {
     ts: Date.now(),
     placed, watchlistPlaced, consensusExits, cryptoPlaced, closed: closedCount, closeReasons, scouted,
+    fetchOk, tradersTotal, signalsLogged, signalsResolved,
     openCount: portfolio.open.length,
-    balance: Math.round(portfolio.balance * 100) / 100,
+    balance: round2(portfolio.balance),
+    openValue,
+    totalValue: round2(portfolio.balance + openValue),
   };
 
   const pipe = redis.pipeline();
@@ -93,6 +115,20 @@ export default async function handler(req, res) {
   pipe.set(KEYS.LAST_RUN, Date.now());
   pipe.lpush(KEYS.RUN_LOG, JSON.stringify(logEntry));
   pipe.ltrim(KEYS.RUN_LOG, 0, 49);
+
+  // Hourly mark-to-market point for the 30-day equity curve. The 55-min gate
+  // also stops point spam from manual dashboard-triggered runs.
+  try {
+    const lastPoint = await redis.lindex(KEYS.EQUITY_LOG, 0);
+    const lastTs = lastPoint ? (typeof lastPoint === 'string' ? JSON.parse(lastPoint) : lastPoint).ts : 0;
+    if (!lastTs || Date.now() - lastTs > 55 * 60000) {
+      pipe.lpush(KEYS.EQUITY_LOG, JSON.stringify({
+        ts: Date.now(), balance: logEntry.balance, openValue, totalValue: logEntry.totalValue, openCount: portfolio.open.length,
+      }));
+      pipe.ltrim(KEYS.EQUITY_LOG, 0, 719);
+    }
+  } catch {}
+
   pipe.del(KEYS.ENGINE_LOCK);
   await pipe.exec();
 

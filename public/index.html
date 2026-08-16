@@ -769,7 +769,7 @@ async function loadCrypto() {
     let html = '';
     html += '<div class="metrics">';
     for (const [name, c] of Object.entries(coins)) {
-      html += `<div class="metric"><div class="metric-label">${esc(name)}</div><div class="metric-val">$${c.spot.toLocaleString()}</div><div class="metric-sub">${c.vol}% realized vol (90d)</div></div>`;
+      html += `<div class="metric"><div class="metric-label">${esc(name)}</div><div class="metric-val">$${c.spot.toLocaleString()}</div><div class="metric-sub">${c.vol}% ${c.volSource === 'deribit' ? 'implied vol (DVOL)' : 'realized vol (90d)'}</div></div>`;
     }
     html += '</div>';
     html += '<div class="metrics">';
@@ -777,9 +777,32 @@ async function loadCrypto() {
     html += `<div class="metric"><div class="metric-label">Flagged</div><div class="metric-val">${data.stats.flagged}</div><div class="metric-sub">Model vs market gap ≥ 5¢</div></div>`;
     html += '</div>';
 
+    // Model calibration from the signal log
+    const cal = data.calibration;
+    html += '<div class="sec-hdr"><h2>Model calibration</h2></div>';
+    if (cal && cal.resolved > 0) {
+      html += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">';
+      html += `<div class="metric" style="min-width:160px"><div class="metric-label">Brier score</div><div class="metric-val">${cal.brier}</div><div class="metric-sub">${cal.resolved} resolved · ${cal.pending} pending${cal.resolved < 30 ? ' · needs ~30+ to trust' : ''}</div></div>`;
+      html += '<div class="metric" style="flex:1;min-width:280px"><div class="metric-label">Model probability vs what actually happened</div>';
+      for (const b of cal.buckets) {
+        const dim = b.n < 5;
+        html += `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;${dim ? 'opacity:.45' : ''}">
+          <span style="min-width:52px;color:var(--ink3)">${b.lo}–${b.hi}¢</span>
+          <div style="flex:1;display:flex;flex-direction:column;gap:2px">
+            <div style="height:5px;border-radius:3px;background:var(--s2)"><div style="height:5px;border-radius:3px;width:${b.n ? Math.round(b.avgModel * 100) : 0}%;background:var(--accent)"></div></div>
+            <div style="height:5px;border-radius:3px;background:var(--s2)"><div style="height:5px;border-radius:3px;width:${b.n ? Math.round(b.freq * 100) : 0}%;background:var(--good)"></div></div>
+          </div>
+          <span style="min-width:150px;text-align:right;font-variant-numeric:tabular-nums">${b.n ? `model ${Math.round(b.avgModel * 100)}¢ → hit ${Math.round(b.freq * 100)}% (n=${b.n})` : 'no data'}</span>
+        </div>`;
+      }
+      html += '<div class="muted" style="margin-top:8px;font-size:10px"><span style="color:var(--accent)">■</span> model said · <span style="color:var(--good)">■</span> actually happened — bars should match when the model is honest. Brier: perfect = 0, coin-flip = 0.25.</div></div></div>';
+    } else {
+      html += '<div class="muted" style="margin-bottom:14px">Collecting signals — calibration appears once flagged markets resolve (a few days of engine runs).</div>';
+    }
+
     if (data.opportunities.length) {
       html += `<div class="sec-hdr"><h2>Model disagreements</h2><span class="sec-count">${data.opportunities.length}</span></div>`;
-      html += '<div class="muted" style="margin-bottom:10px">Fair value from a lognormal model on 90-day realized volatility. A gap is a lead, not a guarantee — the model has no view on news or vol regime changes.</div>';
+      html += '<div class="muted" style="margin-bottom:10px">Fair value from a lognormal model — options-implied vol (Deribit DVOL) for BTC/ETH, 90-day realized vol for the rest. A gap is a lead, not a guarantee.</div>';
       for (const o of data.opportunities) {
         const under = o.edge > 0;
         const buyOutcome = under ? 'Yes' : 'No';
@@ -884,13 +907,9 @@ async function fetchNewsForPositions(positions) {
   return results;
 }
 
-let _equityPts = [];
-function equityCurveSvg(closed) {
-  const sorted = [...closed].filter(t => t.closedAt).sort((a, b) => a.closedAt - b.closedAt);
-  if (sorted.length < 2) { _equityPts = []; return ''; }
-  let eq = PAPER_STARTING_BALANCE;
-  const pts = [{ t: sorted[0].closedAt, v: eq }];
-  for (const tr of sorted) { eq += tr.pnl; pts.push({ t: tr.closedAt, v: eq }); }
+let _equityPts = [], _eqScale = null;
+
+function curveSvgFromPts(pts, baseline) {
   _equityPts = pts;
   const W = 700, H = 150, PAD = 8;
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
@@ -898,9 +917,10 @@ function equityCurveSvg(closed) {
   const span = Math.max(vMax - vMin, 50), y0 = vMin - span * 0.08, y1 = vMax + span * 0.08;
   const x = t => PAD + (W - 2 * PAD) * (t1 === t0 ? 0.5 : (t - t0) / (t1 - t0));
   const y = v => H - PAD - (H - 2 * PAD) * ((v - y0) / (y1 - y0));
+  _eqScale = { x, y, W, H, PAD };
   const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
   const area = line + `L${x(t1).toFixed(1)},${H - PAD}L${x(t0).toFixed(1)},${H - PAD}Z`;
-  const base = y(PAPER_STARTING_BALANCE);
+  const base = y(baseline);
   const last = pts[pts.length - 1].v;
   return `<div style="position:relative" id="eq-wrap">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:150px;display:block" id="eq-svg">
@@ -910,20 +930,47 @@ function equityCurveSvg(closed) {
       <line id="eq-cross" x1="0" y1="${PAD}" x2="0" y2="${H - PAD}" stroke="var(--ink3)" stroke-width="1" vector-effect="non-scaling-stroke" style="display:none"/>
       <circle id="eq-dot" r="3.5" fill="var(--accent)" stroke="var(--s1)" stroke-width="2" style="display:none"/>
     </svg>
-    <div style="display:flex;justify-content:space-between;margin-top:2px" class="muted"><span>${fmtUsd(PAPER_STARTING_BALANCE)} start</span><span class="${cls(last - PAPER_STARTING_BALANCE)}" style="font-weight:600">${fmtUsd2(last)} now</span></div>
+    <div style="display:flex;justify-content:space-between;margin-top:2px" class="muted"><span>${fmtUsd(baseline)} start</span><span class="${cls(last - baseline)}" style="font-weight:600">${fmtUsd2(last)} now</span></div>
     <div id="eq-tip" style="position:absolute;top:0;left:0;display:none;background:var(--s2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:10px;pointer-events:none;white-space:nowrap;z-index:5"></div>
   </div>`;
 }
+
+function equityCurveSvg(closed) {
+  const sorted = [...closed].filter(t => t.closedAt).sort((a, b) => a.closedAt - b.closedAt);
+  if (sorted.length < 2) { _equityPts = []; return ''; }
+  let eq = PAPER_STARTING_BALANCE;
+  const pts = [{ t: sorted[0].closedAt, v: eq }];
+  for (const tr of sorted) { eq += tr.pnl; pts.push({ t: tr.closedAt, v: eq }); }
+  return curveSvgFromPts(pts, PAPER_STARTING_BALANCE);
+}
+
+function mtmCurveSvg(equityLog) {
+  const pts = [...(equityLog || [])].filter(e => e && e.ts && e.totalValue != null).sort((a, b) => a.ts - b.ts).map(e => ({ t: e.ts, v: e.totalValue }));
+  if (pts.length < 2) { _equityPts = []; return ''; }
+  return curveSvgFromPts(pts, PAPER_STARTING_BALANCE);
+}
+
+let _eqMode = 'total', _eqClosed = [], _eqLog = [];
+function eqMetricInner() {
+  const mtmOk = _eqLog.length >= 2;
+  const mode = (_eqMode === 'total' && mtmOk) ? 'total' : 'realized';
+  const curve = mode === 'total' ? mtmCurveSvg(_eqLog) : equityCurveSvg(_eqClosed);
+  if (!curve) return '';
+  const tab = (m, label) => `<span onclick="setEqMode('${m}')" style="cursor:pointer;padding:1px 8px;border-radius:5px;${(mode === m) ? 'background:var(--accent-bg);color:var(--accent)' : 'color:var(--ink3)'}">${label}</span>`;
+  const toggle = mtmOk ? `<span style="font-size:10px;display:flex;gap:2px;text-transform:none;letter-spacing:0">${tab('total', 'Total value')}${tab('realized', 'Realized')}</span>` : '';
+  return `<div class="metric-label" style="display:flex;justify-content:space-between;align-items:center">${mode === 'total' ? 'Portfolio value (hourly)' : 'Realized equity'}${toggle}</div>${curve}`;
+}
+function setEqMode(mode) {
+  _eqMode = mode;
+  const el = $('eq-metric');
+  if (el) { el.innerHTML = eqMetricInner(); bindEquityHover(); }
+}
+
 function bindEquityHover() {
   const svg = $('eq-svg'), tip = $('eq-tip'), cross = $('eq-cross'), dot = $('eq-dot');
-  if (!svg || !_equityPts.length) return;
-  const W = 700, H = 150, PAD = 8;
+  if (!svg || !_equityPts.length || !_eqScale) return;
+  const { x: xOf, y: yOf, W, H } = _eqScale;
   const pts = _equityPts;
-  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
-  const vMin = Math.min(...pts.map(p => p.v)), vMax = Math.max(...pts.map(p => p.v));
-  const span = Math.max(vMax - vMin, 50), yy0 = vMin - span * 0.08, yy1 = vMax + span * 0.08;
-  const xOf = t => PAD + (W - 2 * PAD) * (t1 === t0 ? 0.5 : (t - t0) / (t1 - t0));
-  const yOf = v => H - PAD - (H - 2 * PAD) * ((v - yy0) / (yy1 - yy0));
   svg.addEventListener('mousemove', e => {
     const r = svg.getBoundingClientRect();
     const vx = (e.clientX - r.left) / r.width * W;
@@ -931,7 +978,7 @@ function bindEquityHover() {
     for (const p of pts) { const d = Math.abs(xOf(p.t) - vx); if (d < bd) { bd = d; best = p; } }
     cross.setAttribute('x1', xOf(best.t)); cross.setAttribute('x2', xOf(best.t)); cross.style.display = '';
     dot.setAttribute('cx', xOf(best.t)); dot.setAttribute('cy', yOf(best.v)); dot.style.display = '';
-    tip.textContent = `${new Date(best.t).toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${fmtUsd2(best.v)}`;
+    tip.textContent = `${new Date(best.t).toLocaleDateString([], { month: 'short', day: 'numeric' })} ${new Date(best.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${fmtUsd2(best.v)}`;
     tip.style.display = '';
     const px = (xOf(best.t) / W) * r.width;
     tip.style.left = Math.min(Math.max(px - 40, 0), r.width - 110) + 'px';
@@ -1008,13 +1055,15 @@ async function loadPaper() {
   html += `<div class="metric"><div class="metric-label">Win rate</div><div class="metric-val">${winRate}%</div><div class="metric-sub">${winCount}W / ${paper.closed.length - winCount}L</div></div>`;
   html += '</div>';
 
-  // Equity curve + per-source split
-  const eqSvg = paper.closed.length >= 2 ? equityCurveSvg(paper.closed) : '';
-  if (eqSvg) {
+  // Equity curve (mark-to-market when hourly snapshots exist) + source split
+  _eqClosed = paper.closed;
+  _eqLog = (state.equityLog || []).filter(e => e && e.ts && e.totalValue != null);
+  const eqInner = eqMetricInner();
+  if (eqInner) {
     const srcAgg = {};
     for (const t of paper.closed) { const s = t.source || 'consensus'; if (!srcAgg[s]) srcAgg[s] = { pnl: 0, n: 0 }; srcAgg[s].pnl += t.pnl; srcAgg[s].n++; }
     html += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">';
-    html += `<div class="metric" style="flex:2;min-width:280px"><div class="metric-label">Realized equity</div>${eqSvg}</div>`;
+    html += `<div class="metric" style="flex:2;min-width:280px" id="eq-metric">${eqInner}</div>`;
     html += '<div style="flex:1;min-width:150px;display:flex;flex-direction:column;gap:10px">';
     for (const [src, a] of Object.entries(srcAgg).sort((x, y) => y[1].pnl - x[1].pnl)) {
       html += `<div class="metric" style="flex:1"><div class="metric-label">${esc(src)}</div><div class="metric-val ${cls(a.pnl)}">${fmtUsd2(a.pnl)}</div><div class="metric-sub">${a.n} closed trade${a.n === 1 ? '' : 's'}</div></div>`;
@@ -1057,7 +1106,7 @@ async function loadPaper() {
   html += '<div id="port-closed" class="port-panel" style="display:none">';
   if (paper.closed.length) {
     const sorted = [...paper.closed].sort((a, b) => b.closedAt - a.closedAt);
-    const reasonLabels = { 'take-profit': 'TP +25%', 'stop-loss': 'SL -20%', 'trailing-stop': 'Trail', 'consensus-exit': 'Cons. exit', 'manual': 'Manual' };
+    const reasonLabels = { 'take-profit': 'TP +25%', 'stop-loss': 'SL -20%', 'trailing-stop': 'Trail', 'consensus-exit': 'Cons. exit', 'manual': 'Manual', 'resolved': 'Resolved', 'stale-exit': 'Stale' };
     for (const t of sorted.slice(0, 30)) {
       const icon = t.pnl > 0 ? '✅' : t.pnl < 0 ? '❌' : '➡️';
       html += `<div class="pos-card" style="opacity:.85;border-left:2px solid ${t.pnl > 0 ? 'var(--good)' : t.pnl < 0 ? 'var(--bad)' : 'var(--border)'}">
@@ -1105,7 +1154,7 @@ async function loadPaper() {
                     r.closed > 0 ? '<span class="log-badge" style="background:var(--good-bg);color:var(--good)">Close</span>' :
                     r.scouted > 0 ? '<span class="log-badge" style="background:var(--pro-bg);color:var(--pro)">Scout</span>' :
                     '<span class="log-badge" style="background:var(--s2);color:var(--ink3)">Idle</span>';
-      html += `<div class="log-row"><span class="log-time">${ts}</span><span class="log-detail">${detail} · ${r.openCount} open · ${fmtUsd(r.balance)}</span>${badge}</div>`;
+      html += `<div class="log-row"><span class="log-time">${ts}</span><span class="log-detail">${detail} · ${r.openCount} open · ${fmtUsd(r.balance)}${r.totalValue != null ? ` · total ${fmtUsd(r.totalValue)}` : ''}</span>${badge}</div>`;
     }
   } else { html += '<div class="status">No runs logged yet.</div>'; }
   html += '</div>';

@@ -11,18 +11,21 @@ function defaultPortfolio() {
 
 export default async function handler(req, res) {
   if (req.method === 'GET') {
-    const [portfolio, watchlist, lastRun, runLog] = await Promise.all([
+    const [portfolio, watchlist, lastRun, runLog, equityLog] = await Promise.all([
       redis.get(KEYS.PORTFOLIO),
       redis.get(KEYS.WATCHLIST),
       redis.get(KEYS.LAST_RUN),
       redis.lrange(KEYS.RUN_LOG, 0, 9),
+      redis.lrange(KEYS.EQUITY_LOG, 0, 719),
     ]);
 
+    const parse = r => typeof r === 'string' ? JSON.parse(r) : r;
     return res.status(200).json({
       portfolio: portfolio || defaultPortfolio(),
       watchlist: watchlist || {},
       lastRun: lastRun || null,
-      runLog: (runLog || []).map(r => typeof r === 'string' ? JSON.parse(r) : r),
+      runLog: (runLog || []).map(parse),
+      equityLog: (equityLog || []).map(parse),
     });
   }
 
@@ -113,6 +116,9 @@ export default async function handler(req, res) {
       pipe.del(KEYS.RUN_LOG);
       pipe.del(KEYS.LAST_RUN);
       pipe.del(KEYS.RUN_COUNT);
+      pipe.del(KEYS.EQUITY_LOG);
+      // SIGNAL_LOG deliberately survives reset: it measures the model,
+      // not the portfolio, and takes weeks to re-accumulate.
       await pipe.exec();
       return res.status(200).json({ ok: true });
     }
