@@ -89,6 +89,16 @@ export default async function handler(req, res) {
       if (data.autoClose !== undefined) portfolio.autoClose = data.autoClose;
       if (data.cryptoTrade !== undefined) portfolio.cryptoTrade = data.cryptoTrade;
       if (data.minConsensus !== undefined) portfolio.minConsensus = parseInt(data.minConsensus);
+      if (data.takeProfitPct !== undefined) {
+        const v = data.takeProfitPct === null ? null : parseFloat(data.takeProfitPct);
+        if (v === null) portfolio.takeProfitPct = null;
+        else if (Number.isFinite(v)) portfolio.takeProfitPct = Math.min(Math.max(v, 0.10), 2);
+      }
+      if (data.stopLossPct !== undefined) {
+        const v = data.stopLossPct === null ? null : parseFloat(data.stopLossPct);
+        if (v === null) portfolio.stopLossPct = null;
+        else if (Number.isFinite(v)) portfolio.stopLossPct = Math.min(Math.max(v, 0.05), 0.50);
+      }
       await redis.set(KEYS.PORTFOLIO, portfolio);
       return res.status(200).json({ ok: true });
     }

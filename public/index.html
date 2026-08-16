@@ -837,7 +837,15 @@ async function loadSettings() {
     let html = '<div class="retro-card"><h3>Trading engine</h3>';
     html += `<div class="toggle-row"><span class="toggle-label">Consensus auto-trade</span><div class="toggle ${paper.autoTrade ? 'on' : ''}" onclick="toggleAutoTrade()"></div><span class="toggle-hint">${paper.autoTrade ? 'Active' : 'Off'}</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Mirror watchlist</span><div class="toggle ${paper.mirrorWatchlist ? 'on' : ''}" onclick="toggleMirrorWatchlist()"></div><span class="toggle-hint">${paper.mirrorWatchlist ? `Mirroring ${wlCount} insider(s)` : 'Off'}</span></div>`;
-    html += `<div class="toggle-row"><span class="toggle-label">Auto-close (TP/SL)</span><div class="toggle ${paper.autoClose !== false ? 'on' : ''}" onclick="toggleAutoClose()"></div><span class="toggle-hint">${paper.autoClose !== false ? '+25% TP · -20% SL' : 'Off'}</span></div>`;
+    const tpVal = paper.takeProfitPct === null ? null : (paper.takeProfitPct ?? 0.25);
+    const slVal = paper.stopLossPct === null ? null : (paper.stopLossPct ?? 0.2);
+    const tpLabel = tpVal === null ? 'TP off' : `+${Math.round(tpVal * 100)}% TP`;
+    const slLabel = slVal === null ? 'SL off' : `-${Math.round(slVal * 100)}% SL`;
+    html += `<div class="toggle-row"><span class="toggle-label">Auto-close (TP/SL)</span><div class="toggle ${paper.autoClose !== false ? 'on' : ''}" onclick="toggleAutoClose()"></div><span class="toggle-hint">${paper.autoClose !== false ? `${tpLabel} · ${slLabel}` : 'Off'}</span></div>`;
+    const tpOpt = (v, label) => `<option value="${v}" ${String(tpVal) === String(v === 'off' ? null : parseFloat(v)) ? 'selected' : ''}>${label}</option>`;
+    const slOpt = (v, label) => `<option value="${v}" ${String(slVal) === String(v === 'off' ? null : parseFloat(v)) ? 'selected' : ''}>${label}</option>`;
+    html += `<div class="toggle-row"><span class="toggle-label">Take-profit</span><select onchange="setTakeProfit(this.value)">${tpOpt('0.15', '+15%')}${tpOpt('0.25', '+25%')}${tpOpt('0.4', '+40%')}${tpOpt('0.6', '+60%')}${tpOpt('off', 'Off — hold to resolution')}</select><span class="toggle-hint">Bank winners at this gain</span></div>`;
+    html += `<div class="toggle-row"><span class="toggle-label">Stop-loss</span><select onchange="setStopLoss(this.value)">${slOpt('0.1', '−10%')}${slOpt('0.15', '−15%')}${slOpt('0.2', '−20%')}${slOpt('0.3', '−30%')}${slOpt('off', 'Off — no stop')}</select><span class="toggle-hint">Cut losers at this loss</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Crypto edge trading</span><div class="toggle ${paper.cryptoTrade !== false ? 'on' : ''}" onclick="toggleCryptoTrade()"></div><span class="toggle-hint">${paper.cryptoTrade !== false ? 'Max 4 pos · $150 each · 10¢+ edge · 2–60d out · holds to resolution' : 'Off'}</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Min consensus</span><select onchange="setMinConsensus(this.value)"><option value="6" ${(paper.minConsensus||6)===6?'selected':''}>6+ traders</option><option value="10" ${(paper.minConsensus||6)===10?'selected':''}>10+</option><option value="15" ${(paper.minConsensus||6)===15?'selected':''}>15+</option><option value="20" ${(paper.minConsensus||6)===20?'selected':''}>20+</option></select><span class="toggle-hint">Higher = fewer trades</span></div>`;
     html += `<div class="toggle-row"><button class="btn" onclick="scoutInsiders()" id="scout-btn">🔍 Scout insiders</button><span class="toggle-hint">${wlCount} watched</span></div>`;
@@ -871,6 +879,8 @@ async function toggleAutoTrade() { const p = await getPaper(); await stateAPI('s
 async function toggleMirrorWatchlist() { const p = await getPaper(); await stateAPI('settings', { mirrorWatchlist: !p.mirrorWatchlist }); loadPaper(); loadSettings(); }
 async function toggleAutoClose() { const p = await getPaper(); await stateAPI('settings', { autoClose: !p.autoClose }); loadPaper(); loadSettings(); }
 async function toggleCryptoTrade() { const p = await getPaper(); await stateAPI('settings', { cryptoTrade: p.cryptoTrade === false }); loadSettings(); }
+async function setTakeProfit(v) { await stateAPI('settings', { takeProfitPct: v === 'off' ? null : parseFloat(v) }); loadSettings(); }
+async function setStopLoss(v) { await stateAPI('settings', { stopLossPct: v === 'off' ? null : parseFloat(v) }); loadSettings(); }
 async function setMinConsensus(val) { await stateAPI('settings', { minConsensus: parseInt(val) }); }
 async function closePaperPosition(key) { await stateAPI('close_position', { key }); loadPaper(); }
 async function triggerTradeRun() {
@@ -1085,7 +1095,10 @@ async function loadPaper() {
     const catIcon = title => { const t = title.toLowerCase(); if (/bitcoin|btc|ethereum|crypto|sol|xrp/i.test(t)) return '🪙'; if (/nfl|nba|mlb|nhl|soccer|football|ufc|mma|boxing|tennis|cricket|dota|esport|game/i.test(t)) return '⚽'; if (/trump|biden|election|president|senate/i.test(t)) return '🏛'; if (/fed|inflation|gdp|rate|cpi|tariff/i.test(t)) return '📉'; return '📊'; };
     for (let i = 0; i < paper.open.length; i++) {
       const p = paper.open[i], cur = p.currentPrice ?? p.entry, val = p.shares * cur, pnl = val - p.cost, pnlPct = p.cost > 0 ? (pnl / p.cost * 100).toFixed(1) : '0.0';
-      const nearTP = pnl / p.cost >= TAKE_PROFIT_PCT * 0.8, nearSL = pnl / p.cost <= STOP_LOSS_PCT * 0.8;
+      const tpLevel = paper.takeProfitPct === null ? null : (paper.takeProfitPct ?? TAKE_PROFIT_PCT);
+      const slLevel = paper.stopLossPct === null ? null : (paper.stopLossPct ?? -STOP_LOSS_PCT);
+      const nearTP = tpLevel !== null && pnl / p.cost >= tpLevel * 0.8;
+      const nearSL = slLevel !== null && pnl / p.cost <= -slLevel * 0.8;
       const isStale = !p.resolved && !p.slug && (p.currentPrice == null || p.currentPrice === p.entry) && (Date.now() - (p.openedAt || 0)) > 24 * 3600000;
       const statusBadge = p.resolved ? '<span class="badge hot">resolving</span>' : isStale ? '<span class="badge" style="background:var(--warn-bg);color:var(--warn)">stale price</span>' : '';
       html += `<div class="pos-card" style="${nearTP ? 'border-left:2px solid var(--good)' : nearSL ? 'border-left:2px solid var(--bad)' : ''}">
