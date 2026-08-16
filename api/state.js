@@ -1,8 +1,14 @@
 import { redis, KEYS } from '../lib/redis.js';
 import { MAX_POSITIONS } from '../lib/constants.js';
 import { defaultPortfolio, normalizePortfolio } from '../lib/portfolio.js';
+import { hasDashboardAuth } from '../lib/auth.js';
 
 export default async function handler(req, res) {
+  // The portfolio is private state: reads expose it, writes mutate it.
+  if (!hasDashboardAuth(req)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
   if (req.method === 'GET') {
     const [portfolio, watchlist, lastRun, runLog, equityLog] = await Promise.all([
       redis.get(KEYS.PORTFOLIO),

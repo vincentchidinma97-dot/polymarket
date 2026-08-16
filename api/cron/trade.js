@@ -1,6 +1,7 @@
 import { redis, KEYS } from '../../lib/redis.js';
 import { MIN_RUN_INTERVAL_MS } from '../../lib/constants.js';
 import { normalizePortfolio } from '../../lib/portfolio.js';
+import { hasCronAuth, hasDashboardAuth } from '../../lib/auth.js';
 import { runAutoTrade } from '../../lib/engine/auto-trade.js';
 import { runCryptoTrade } from '../../lib/engine/crypto-trade.js';
 import { scanCryptoEdges } from '../../lib/engine/crypto-edge.js';
@@ -10,15 +11,9 @@ import { updateOpenPrices } from '../../lib/engine/price-update.js';
 import { scoutInsiders } from '../../lib/engine/scout.js';
 
 export default async function handler(req, res) {
-  const isVercelCron = req.headers['x-vercel-cron'] === '1';
-  const cronSecret = process.env.CRON_SECRET;
-  const authHeader = req.headers.authorization;
-  const isDashboard = req.query.source === 'dashboard';
-
-  const queryKey = req.query.key;
-  const hasValidAuth = authHeader === `Bearer ${cronSecret}` || queryKey === cronSecret;
-
-  if (!isVercelCron && !isDashboard && (!cronSecret || !hasValidAuth)) {
+  // Cron provenance (Vercel header / CRON_SECRET) or the authenticated
+  // dashboard. No unauthenticated bypass: this endpoint mutates the book.
+  if (!hasCronAuth(req) && !hasDashboardAuth(req)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 

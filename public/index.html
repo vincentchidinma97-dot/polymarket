@@ -348,8 +348,10 @@ const fmtUsd2 = n => (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString(undef
 const fmtCents = p => (p * 100).toFixed(1) + '¢';
 const cls = n => n > 0 ? 'good' : n < 0 ? 'bad' : '';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-// For values embedded in a '...'-quoted JS string inside an onclick attribute
-const jsq = s => esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+// For values embedded in a '...'-quoted JS string inside an onclick attribute.
+// esc() alone is NOT safe there: the browser decodes &#39; back to a quote
+// before compiling the handler, so a crafted name breaks out of the literal.
+const jsq = s => esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' '));
 // Shared bullish/bearish/neutral color for TA stances and news sentiment
 const stanceColor = s => s === 'bullish' ? 'var(--good)' : s === 'bearish' ? 'var(--bad)' : 'var(--ink3)';
 const short = w => w ? w.slice(0, 6) + '…' + w.slice(-4) : '';
@@ -426,7 +428,7 @@ function toggleWatch(wallet, name, e) {
 }
 function watchBtnHtml(wallet, name) {
   const active = isWatching(wallet);
-  return `<button class="watch-btn ${active ? 'active' : ''}" data-wallet="${esc(wallet)}" onclick="toggleWatch('${esc(wallet)}','${esc(name)}',event)">${active ? 'Watching' : '+ Watch'}</button>`;
+  return `<button class="watch-btn ${active ? 'active' : ''}" data-wallet="${esc(wallet)}" onclick="toggleWatch('${jsq(wallet)}','${jsq(name)}',event)">${active ? 'Watching' : '+ Watch'}</button>`;
 }
 function exportWatchlist() {
   const wl = getWatchlist();
@@ -546,7 +548,7 @@ async function loadSignals() {
           <div class="muted">Outcome: <strong style="color:var(--ink)">${esc(c.outcome)}</strong></div></div>
           <div style="text-align:right"><div style="font-size:14px;font-weight:500">${fmtUsd(c.totalValue)}</div><div class="muted">Avg: ${fmtCents(avgEntry)} → ${fmtCents(avgNow)}</div><div style="margin-top:5px">${avgNow > 0.01 && avgNow < 0.99 ? buyBtnHtml(c.title, c.outcome, c.slug, avgNow, c.traders.length) : ''}</div></div>
         </div>
-        <div class="chip-row">${c.traders.map(t => `<span class="chip" onclick="openTrader('${esc(t.wallet)}','${esc(t.name)}')">${esc(t.name)} <span class="muted">#${t.rank}</span></span>`).join('')}</div>
+        <div class="chip-row">${c.traders.map(t => `<span class="chip" onclick="openTrader('${jsq(t.wallet)}','${jsq(t.name)}')">${esc(t.name)} <span class="muted">#${t.rank}</span></span>`).join('')}</div>
       </div>`;
     }
     if (!consensusSignals.length) html += '<div class="status">No consensus plays right now.</div>';
@@ -555,7 +557,7 @@ async function loadSignals() {
     if (copyablePositions.length) {
       html += `<div class="scroll"><table><thead><tr><th>Trader</th><th>Market</th><th>Outcome</th><th class="num">Entry</th><th class="num">Now</th><th class="num">Gap</th><th class="num">Value</th><th></th></tr></thead><tbody>`;
       for (const p of copyablePositions.slice(0, 30)) {
-        html += `<tr class="click" onclick="openTrader('${esc(p.traderWallet)}','${esc(p.traderName)}')">
+        html += `<tr class="click" onclick="openTrader('${jsq(p.traderWallet)}','${jsq(p.traderName)}')">
           <td><span style="color:var(--accent)">${esc(p.traderName)}</span><div class="muted">#${p.traderRank}</div></td>
           <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.title)}</td>
           <td>${esc(p.outcome)}</td><td class="num">${fmtCents(p.avgPrice)}</td><td class="num">${fmtCents(p.curPrice)}</td>
@@ -570,7 +572,7 @@ async function loadSignals() {
       html += `<div class="sec-hdr"><h2>Fresh wallet alerts</h2><span class="sec-count">${freshWallets.length}</span></div>`;
       for (const t of freshWallets.slice(0, 8)) {
         const name = displayName(t);
-        html += `<div class="pos-card" onclick="openTrader('${esc(t.proxyWallet)}','${esc(name)}')">
+        html += `<div class="pos-card" onclick="openTrader('${jsq(t.proxyWallet)}','${jsq(name)}')">
           <div class="pos-icon">✨</div>
           <div class="pos-info"><div class="pos-title">${esc(name)}</div><div class="pos-meta"><span>${t.totalPositions} positions</span><span class="accent-c">${fmtUsd(t.pnl)} profit</span></div></div>
           <div>${watchBtnHtml(t.proxyWallet, name)}</div>
@@ -614,7 +616,7 @@ async function loadWatchlist() {
     html += `<div class="muted" style="margin-bottom:10px">Tracking ${wallets.length} insider(s) · ${new Date().toLocaleTimeString()}</div>`;
     for (const r of results) {
       if (!r.ok) { html += `<div class="card"><span>${esc(r.name)}</span> <span class="muted">Error: ${esc(r.error)}</span></div>`; continue; }
-      html += `<div class="card" onclick="openTrader('${esc(r.wallet)}','${esc(r.name)}')">
+      html += `<div class="card" onclick="openTrader('${jsq(r.wallet)}','${jsq(r.name)}')">
         <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:6px">
           <div><span style="font-weight:600;font-size:14px">${esc(r.name)}</span><span class="badge watching">Watching</span>${r.recentTrades.length ? '<span class="badge hot">Active</span>' : ''}<div class="muted">${short(r.wallet)}</div></div>
           <div style="text-align:right"><div style="font-weight:600">${r.open.length} open · ${fmtUsd(r.openValue)}</div><div class="muted ${cls(r.unrealized)}">Unrealized: ${fmtUsd(r.unrealized)}</div></div>
@@ -638,7 +640,7 @@ async function loadLeaderboard() {
     const rows = await api('leaderboard', { window: $('lb-window').value, rankType: $('lb-rank').value, limit: 25 });
     el.innerHTML = `<div class="scroll"><table><thead><tr><th>#</th><th>Trader</th><th></th><th class="num">Profit</th><th class="num">Volume</th><th class="num">Efficiency</th></tr></thead><tbody>` +
       rows.map(u => { const eff = u.vol > 0 ? (u.pnl / u.vol) : null; const name = displayName(u);
-        return `<tr class="click" onclick="openTrader('${esc(u.proxyWallet)}','${esc(name)}')"><td class="muted">${esc(u.rank)}</td><td><span style="color:var(--accent)">${esc(name)}</span><div class="muted">${short(u.proxyWallet)}</div></td><td>${watchBtnHtml(u.proxyWallet, name)}</td><td class="num ${cls(u.pnl)}">${fmtUsd(u.pnl)}</td><td class="num">${fmtUsd(u.vol)}</td><td class="num muted">${eff === null ? '—' : (eff * 100).toFixed(1) + '%'}</td></tr>`;
+        return `<tr class="click" onclick="openTrader('${jsq(u.proxyWallet)}','${jsq(name)}')"><td class="muted">${esc(u.rank)}</td><td><span style="color:var(--accent)">${esc(name)}</span><div class="muted">${short(u.proxyWallet)}</div></td><td>${watchBtnHtml(u.proxyWallet, name)}</td><td class="num ${cls(u.pnl)}">${fmtUsd(u.pnl)}</td><td class="num">${fmtUsd(u.vol)}</td><td class="num muted">${eff === null ? '—' : (eff * 100).toFixed(1) + '%'}</td></tr>`;
       }).join('') + '</tbody></table></div>';
   } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
 }
@@ -662,7 +664,7 @@ async function loadNewWinners() {
       html += `<div class="sec-hdr"><h2>Copyable — open positions</h2><span class="sec-count">${copyable.length}</span></div>`;
       for (const u of copyable) {
         const name = displayName(u); const eff = u.vol > 0 ? (u.pnl / u.vol) : null;
-        html += `<div class="card" onclick="openTrader('${esc(u.proxyWallet)}','${esc(name)}')">
+        html += `<div class="card" onclick="openTrader('${jsq(u.proxyWallet)}','${jsq(name)}')">
           <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:6px">
             <div><span style="font-weight:600;font-size:14px">${esc(name)}</span>${u.totalPositions < 30 ? '<span class="badge new">Fresh</span>' : ''}${eff > 0.3 ? '<span class="badge hot">High edge</span>' : ''} ${watchBtnHtml(u.proxyWallet, name)}<div class="muted">${u.totalPositions} lifetime · ${u.openPositions.length} open · ${fmtUsd(u.openValue)} exposed</div></div>
             <div style="text-align:right"><div class="good" style="font-size:15px;font-weight:600">${fmtUsd(u.pnl)}</div><div class="muted">${fmtUsd(u.vol)} vol</div></div>
@@ -672,7 +674,7 @@ async function loadNewWinners() {
     if (ghosts.length) {
       html += `<div class="sec-hdr"><h2>Ghost profiteers — no open positions</h2><span class="sec-count">${ghosts.length}</span></div>`;
       html += `<div class="scroll"><table><thead><tr><th>#</th><th>Trader</th><th></th><th class="num">Profit</th><th class="num">Volume</th><th class="num">Positions</th></tr></thead><tbody>` +
-        ghosts.map((u, i) => { const name = displayName(u); return `<tr class="click" onclick="openTrader('${esc(u.proxyWallet)}','${esc(name)}')"><td class="muted">${i+1}</td><td><span style="color:var(--accent)">${esc(name)}</span><div class="muted">${short(u.proxyWallet)}</div></td><td>${watchBtnHtml(u.proxyWallet, name)}</td><td class="num good">${fmtUsd(u.pnl)}</td><td class="num">${u.vol > 0 ? fmtUsd(u.vol) : '—'}</td><td class="num">${u.totalPositions}</td></tr>`; }).join('') + '</tbody></table></div>';
+        ghosts.map((u, i) => { const name = displayName(u); return `<tr class="click" onclick="openTrader('${jsq(u.proxyWallet)}','${jsq(name)}')"><td class="muted">${i+1}</td><td><span style="color:var(--accent)">${esc(name)}</span><div class="muted">${short(u.proxyWallet)}</div></td><td>${watchBtnHtml(u.proxyWallet, name)}</td><td class="num good">${fmtUsd(u.pnl)}</td><td class="num">${u.vol > 0 ? fmtUsd(u.vol) : '—'}</td><td class="num">${u.totalPositions}</td></tr>`; }).join('') + '</tbody></table></div>';
     }
     el.innerHTML = html;
   } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
@@ -688,7 +690,7 @@ async function loadWhales() {
     await Promise.all(uniqueWallets.slice(0, 20).map(async w => { try { const pos = await api('positions', { user: w, limit: 30 }); walletInfo[w] = pos.length; } catch { walletInfo[w] = null; } }));
     el.innerHTML = `<div class="scroll"><table><thead><tr><th>When</th><th>Trader</th><th></th><th>Side</th><th>Market</th><th>Outcome</th><th class="num">Price</th><th class="num">Amount</th></tr></thead><tbody>` +
       rows.map(t => { const name = t.name || short(t.proxyWallet); const posCount = walletInfo[t.proxyWallet]; const isFresh = posCount !== null && posCount !== undefined && posCount < 20;
-        return `<tr${isFresh ? ' style="background:rgba(251,191,36,.04)"' : ''}><td class="muted" style="white-space:nowrap">${ago(t.timestamp)}</td><td><span style="color:var(--accent);cursor:pointer" onclick="openTrader('${esc(t.proxyWallet)}','${esc(name)}')">${esc(name)}</span>${isFresh ? '<span class="badge new">New</span>' : ''}${posCount != null ? `<div class="muted">${posCount} pos</div>` : ''}</td><td>${watchBtnHtml(t.proxyWallet, name)}</td><td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${esc(t.side)}</span></td><td>${esc(t.title)}</td><td>${esc(t.outcome)}</td><td class="num">${fmtCents(t.price)}</td><td class="num">${fmtUsd(t.size * t.price)}</td></tr>`; }).join('') + '</tbody></table></div>';
+        return `<tr${isFresh ? ' style="background:rgba(251,191,36,.04)"' : ''}><td class="muted" style="white-space:nowrap">${ago(t.timestamp)}</td><td><span style="color:var(--accent);cursor:pointer" onclick="openTrader('${jsq(t.proxyWallet)}','${jsq(name)}')">${esc(name)}</span>${isFresh ? '<span class="badge new">New</span>' : ''}${posCount != null ? `<div class="muted">${posCount} pos</div>` : ''}</td><td>${watchBtnHtml(t.proxyWallet, name)}</td><td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${esc(t.side)}</span></td><td>${esc(t.title)}</td><td>${esc(t.outcome)}</td><td class="num">${fmtCents(t.price)}</td><td class="num">${fmtUsd(t.size * t.price)}</td></tr>`; }).join('') + '</tbody></table></div>';
   } catch (e) { el.innerHTML = `<div class="status">Failed: ${esc(e.message)}</div>`; }
 }
 function toggleWhaleAuto() {
@@ -887,11 +889,30 @@ const MAX_POSITIONS = 20;
 const MAX_EXPOSURE_PCT = 0.60;
 
 let _stateCache = null;
-async function getServerState(force) { if (_stateCache && !force) return _stateCache; const r = await fetch('/api/state'); if (!r.ok) throw new Error('Failed to load state'); _stateCache = await r.json(); return _stateCache; }
+
+/* Single-user access key: stored locally, sent on every portfolio request. */
+function authHeaders() { const k = localStorage.getItem('pm_key'); return k ? { 'x-dashboard-key': k } : {}; }
+function promptForKey(message) {
+  const k = prompt(message || 'Enter your dashboard access key:');
+  if (k && k.trim()) { localStorage.setItem('pm_key', k.trim()); return true; }
+  return false;
+}
+async function authFetch(url, opts = {}, retried) {
+  const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...authHeaders() } });
+  if (r.status === 401 && !retried) {
+    localStorage.removeItem('pm_key');
+    if (promptForKey('Access key required (wrong or missing key). Enter your dashboard access key:')) {
+      return authFetch(url, opts, true);
+    }
+  }
+  return r;
+}
+
+async function getServerState(force) { if (_stateCache && !force) return _stateCache; const r = await authFetch('/api/state'); if (!r.ok) throw new Error('Failed to load state'); _stateCache = await r.json(); return _stateCache; }
 async function getPaper() { return (await getServerState()).portfolio; }
 function getWatchlistFromCache() { return (_stateCache && _stateCache.watchlist) || {}; }
 async function stateAPI(type, data) {
-  const r = await fetch('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type, data }) });
+  const r = await authFetch('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type, data }) });
   _stateCache = null;
   const body = await r.json();
   if (r.status === 409 && body.busy) alert('The trading engine is running right now — try again in a few seconds.');
@@ -909,12 +930,12 @@ async function setMinConsensus(val) { await stateAPI('settings', { minConsensus:
 async function closePaperPosition(key) { await stateAPI('close_position', { key }); loadPaper(); }
 async function triggerTradeRun() {
   const el = $('paper-body'); el.innerHTML = '<div class="status">Running trading engine…</div>';
-  try { const r = await fetch('/api/cron/trade?source=dashboard'); const result = await r.json(); if (result.skipped) el.innerHTML = `<div class="status">Engine ran recently — next in ${result.nextRunIn}s</div>`; } catch {}
+  try { const r = await authFetch('/api/cron/trade'); const result = await r.json(); if (result.skipped) el.innerHTML = `<div class="status">Engine ran recently — next in ${result.nextRunIn}s</div>`; } catch {}
   _stateCache = null; await loadPaper();
 }
 async function scoutInsiders() {
   const btn = document.getElementById('scout-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Scouting…'; }
-  try { await (await fetch('/api/cron/trade?source=dashboard')).json(); if (btn) { btn.textContent = '✓ Scouted!'; btn.disabled = false; setTimeout(() => { btn.textContent = '🔍 Scout insiders'; }, 3000); } _stateCache = null; loadPaper(); }
+  try { await (await authFetch('/api/cron/trade')).json(); if (btn) { btn.textContent = '✓ Scouted!'; btn.disabled = false; setTimeout(() => { btn.textContent = '🔍 Scout insiders'; }, 3000); } _stateCache = null; loadPaper(); }
   catch { if (btn) { btn.textContent = 'Failed'; btn.disabled = false; } }
 }
 async function migrateToServer() {
