@@ -18,11 +18,25 @@ async function computeCalibration() {
     for (const b of buckets) {
       if (b.n) { b.avgModel = Math.round((b.avgModel / b.n) * 100) / 100; b.freq = Math.round((b.freq / b.n) * 100) / 100; }
     }
+    // Split by TA alignment at signal time — the evidence for whether the
+    // TA veto helps: 'agrees' should out-calibrate 'against' if it does.
+    const byTA = {};
+    for (const r of resolved) {
+      if (!r.taAlignment) continue;
+      if (!byTA[r.taAlignment]) byTA[r.taAlignment] = { n: 0, brierSum: 0 };
+      byTA[r.taAlignment].n++;
+      byTA[r.taAlignment].brierSum += (r.model - r.outcome) ** 2;
+    }
+    for (const k of Object.keys(byTA)) {
+      byTA[k] = { n: byTA[k].n, brier: Math.round((byTA[k].brierSum / byTA[k].n) * 10000) / 10000 };
+    }
+
     return {
       resolved: resolved.length,
       pending,
       brier: resolved.length ? Math.round((brierSum / resolved.length) * 10000) / 10000 : null,
       buckets,
+      byTA: Object.keys(byTA).length ? byTA : null,
     };
   } catch { return null; }
 }

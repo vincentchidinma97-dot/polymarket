@@ -769,7 +769,14 @@ async function loadCrypto() {
     let html = '';
     html += '<div class="metrics">';
     for (const [name, c] of Object.entries(coins)) {
-      html += `<div class="metric"><div class="metric-label">${esc(name)}</div><div class="metric-val">$${c.spot.toLocaleString()}</div><div class="metric-sub">${c.vol}% ${c.volSource === 'deribit' ? 'implied vol (DVOL)' : 'realized vol (90d)'}</div></div>`;
+      const taColor = t => t === 'bullish' ? 'var(--good)' : t === 'bearish' ? 'var(--bad)' : 'var(--ink3)';
+      const taLine = c.ta ? ` · RSI ${c.ta.rsi} · <span style="color:${taColor(c.ta.label)}">${c.ta.label}</span>` : '';
+      html += `<div class="metric"><div class="metric-label">${esc(name)}</div><div class="metric-val">$${c.spot.toLocaleString()}</div><div class="metric-sub">${c.vol}% ${c.volSource === 'deribit' ? 'implied vol' : 'realized vol'}${taLine}</div></div>`;
+    }
+    if (data.stats.fng) {
+      const f = data.stats.fng;
+      const fngColor = f.value >= 60 ? 'var(--good)' : f.value <= 40 ? 'var(--bad)' : 'var(--warn)';
+      html += `<div class="metric"><div class="metric-label">Fear &amp; Greed</div><div class="metric-val" style="color:${fngColor}">${f.value}</div><div class="metric-sub">${esc(f.label)}</div></div>`;
     }
     html += '</div>';
     html += '<div class="metrics">';
@@ -795,14 +802,19 @@ async function loadCrypto() {
           <span style="min-width:150px;text-align:right;font-variant-numeric:tabular-nums">${b.n ? `model ${Math.round(b.avgModel * 100)}¢ → hit ${Math.round(b.freq * 100)}% (n=${b.n})` : 'no data'}</span>
         </div>`;
       }
-      html += '<div class="muted" style="margin-top:8px;font-size:10px"><span style="color:var(--accent)">■</span> model said · <span style="color:var(--good)">■</span> actually happened — bars should match when the model is honest. Brier: perfect = 0, coin-flip = 0.25.</div></div></div>';
+      html += '<div class="muted" style="margin-top:8px;font-size:10px"><span style="color:var(--accent)">■</span> model said · <span style="color:var(--good)">■</span> actually happened — bars should match when the model is honest. Brier: perfect = 0, coin-flip = 0.25.</div>';
+      if (cal.byTA) {
+        const parts = ['agrees', 'neutral', 'against'].filter(k => cal.byTA[k]).map(k => `TA ${k}: ${cal.byTA[k].brier} (n=${cal.byTA[k].n})`);
+        if (parts.length >= 2) html += `<div class="muted" style="margin-top:4px;font-size:10px">Brier by TA alignment — ${parts.join(' · ')}. If "agrees" isn't clearly lower, the TA veto isn't earning its keep.</div>`;
+      }
+      html += '</div></div>';
     } else {
       html += '<div class="muted" style="margin-bottom:14px">Collecting signals — calibration appears once flagged markets resolve (a few days of engine runs).</div>';
     }
 
     if (data.opportunities.length) {
       html += `<div class="sec-hdr"><h2>Model disagreements</h2><span class="sec-count">${data.opportunities.length}</span></div>`;
-      html += '<div class="muted" style="margin-bottom:10px">Fair value from a lognormal model — options-implied vol (Deribit DVOL) for BTC/ETH, 90-day realized vol for the rest. A gap is a lead, not a guarantee.</div>';
+      html += '<div class="muted" style="margin-bottom:10px">Fair value from a lognormal model — options-implied vol for BTC/ETH, realized vol for the rest. The auto-trader also requires trend/momentum (TA) not to strongly oppose the bet. A gap is a lead, not a guarantee.</div>';
       for (const o of data.opportunities) {
         const under = o.edge > 0;
         const buyOutcome = under ? 'Yes' : 'No';
@@ -815,6 +827,7 @@ async function loadCrypto() {
           <div class="arb-prices">
             <div class="arb-plat"><div class="arb-logo" style="background:#0066FF">P</div><span style="color:var(--ink3)">Market</span><span style="font-weight:500;font-variant-numeric:tabular-nums">${(o.market*100).toFixed(0)}¢</span></div>
             <div class="arb-plat"><div class="arb-logo" style="background:#4D7A36">ƒ</div><span style="color:var(--ink3)">Model</span><span style="font-weight:500;font-variant-numeric:tabular-nums">${(o.model*100).toFixed(0)}¢</span></div>
+            ${o.taAlignment ? `<span class="badge" style="${o.taAlignment === 'agrees' ? 'background:var(--good-bg);color:var(--good)' : o.taAlignment === 'against' ? 'background:var(--bad-bg);color:var(--bad)' : 'background:var(--s2);color:var(--ink3)'}">TA ${o.taAlignment}</span>` : ''}
             <span class="arb-dir">${under ? 'YES looks underpriced' : 'YES looks overpriced'}</span>
             ${buyPrice > 0.01 && buyPrice < 0.99 ? buyBtnHtml(o.question, buyOutcome, o.slug, buyPrice, 0) : ''}
           </div>
@@ -847,6 +860,7 @@ async function loadSettings() {
     html += `<div class="toggle-row"><span class="toggle-label">Take-profit</span><select onchange="setTakeProfit(this.value)">${tpOpt('0.15', '+15%')}${tpOpt('0.25', '+25%')}${tpOpt('0.4', '+40%')}${tpOpt('0.6', '+60%')}${tpOpt('off', 'Off — hold to resolution')}</select><span class="toggle-hint">Bank winners at this gain</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Stop-loss</span><select onchange="setStopLoss(this.value)">${slOpt('0.1', '−10%')}${slOpt('0.15', '−15%')}${slOpt('0.2', '−20%')}${slOpt('0.3', '−30%')}${slOpt('off', 'Off — no stop')}</select><span class="toggle-hint">Cut losers at this loss</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Crypto edge trading</span><div class="toggle ${paper.cryptoTrade !== false ? 'on' : ''}" onclick="toggleCryptoTrade()"></div><span class="toggle-hint">${paper.cryptoTrade !== false ? 'Max 4 pos · $150 each · 10¢+ edge · 2–60d out · holds to resolution' : 'Off'}</span></div>`;
+    html += `<div class="toggle-row"><span class="toggle-label">TA veto on crypto</span><div class="toggle ${paper.cryptoTaFilter !== false ? 'on' : ''}" onclick="toggleCryptoTaFilter()"></div><span class="toggle-hint">${paper.cryptoTaFilter !== false ? 'Skips bets that fight trend + momentum + volume' : 'Off — model edge alone decides'}</span></div>`;
     html += `<div class="toggle-row"><span class="toggle-label">Min consensus</span><select onchange="setMinConsensus(this.value)"><option value="6" ${(paper.minConsensus||6)===6?'selected':''}>6+ traders</option><option value="10" ${(paper.minConsensus||6)===10?'selected':''}>10+</option><option value="15" ${(paper.minConsensus||6)===15?'selected':''}>15+</option><option value="20" ${(paper.minConsensus||6)===20?'selected':''}>20+</option></select><span class="toggle-hint">Higher = fewer trades</span></div>`;
     html += `<div class="toggle-row"><button class="btn" onclick="scoutInsiders()" id="scout-btn">🔍 Scout insiders</button><span class="toggle-hint">${wlCount} watched</span></div>`;
     html += '</div>';
@@ -879,6 +893,7 @@ async function toggleAutoTrade() { const p = await getPaper(); await stateAPI('s
 async function toggleMirrorWatchlist() { const p = await getPaper(); await stateAPI('settings', { mirrorWatchlist: !p.mirrorWatchlist }); loadPaper(); loadSettings(); }
 async function toggleAutoClose() { const p = await getPaper(); await stateAPI('settings', { autoClose: !p.autoClose }); loadPaper(); loadSettings(); }
 async function toggleCryptoTrade() { const p = await getPaper(); await stateAPI('settings', { cryptoTrade: p.cryptoTrade === false }); loadSettings(); }
+async function toggleCryptoTaFilter() { const p = await getPaper(); await stateAPI('settings', { cryptoTaFilter: p.cryptoTaFilter === false }); loadSettings(); }
 async function setTakeProfit(v) { await stateAPI('settings', { takeProfitPct: v === 'off' ? null : parseFloat(v) }); loadSettings(); }
 async function setStopLoss(v) { await stateAPI('settings', { stopLossPct: v === 'off' ? null : parseFloat(v) }); loadSettings(); }
 async function setMinConsensus(val) { await stateAPI('settings', { minConsensus: parseInt(val) }); }

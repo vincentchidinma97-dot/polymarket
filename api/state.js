@@ -88,6 +88,7 @@ export default async function handler(req, res) {
       if (data.mirrorWatchlist !== undefined) portfolio.mirrorWatchlist = data.mirrorWatchlist;
       if (data.autoClose !== undefined) portfolio.autoClose = data.autoClose;
       if (data.cryptoTrade !== undefined) portfolio.cryptoTrade = data.cryptoTrade;
+      if (data.cryptoTaFilter !== undefined) portfolio.cryptoTaFilter = data.cryptoTaFilter;
       if (data.minConsensus !== undefined) portfolio.minConsensus = parseInt(data.minConsensus);
       if (data.takeProfitPct !== undefined) {
         const v = data.takeProfitPct === null ? null : parseFloat(data.takeProfitPct);

@@ -84,7 +84,7 @@ class Handler(BaseHTTPRequestHandler):
         data = body.get("data", {})
 
         if t == "settings":
-            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "cryptoTrade", "minConsensus", "takeProfitPct", "stopLossPct"):
+            for k in ("autoTrade", "mirrorWatchlist", "autoClose", "cryptoTrade", "cryptoTaFilter", "minConsensus", "takeProfitPct", "stopLossPct"):
                 if k in data:
                     state["portfolio"][k] = data[k]
         elif t == "watchlist":
